@@ -1318,7 +1318,14 @@ namespace TomatoBiquga
                 {
                     Log("⚠ 「" + SiteRegistry.LabelOf(searchSiteKey) + "」返回的 " + list.Count
                         + " 条里没有一条标题含「" + kw + "」—— 换个源找找看…");
-                    var hits = ScanOtherSitesForExact(kw, searchSiteKey);                    if (hits != null && hits.Count > 0)
+                    // ★ 这趟是**附加服务**，绝不能因为它失败就弹模态框。
+                    //   用户报过一个弹窗：「请求失败（已重试 3 次）：…biquga.com/search.html
+                    //   curl 退出码 28」—— 他明明选的是笔趣阁365，报错的却是笔趣阁 PC 版，
+                    //   因为跨站扫描扫到了那个慢站。搜索本身是成功的，弹窗纯属噪音。
+                    List<SiteBookHit> hits = null;
+                    try { hits = ScanOtherSitesForExact(kw, searchSiteKey); }
+                    catch (Exception ex) { Log("   · 跨站查找中断（不影响上面的结果）：" + ex.Message); }
+                    if (hits != null && hits.Count > 0)
                     {
                         foreach (var h in hits)
                             Log("   · 「" + h.SiteLabel + "」有：" + h.Book.Title
@@ -1388,7 +1395,8 @@ namespace TomatoBiquga
             return ScanSitesForExact(kw, skipSiteKey,
                 delegate (string s) { Log(s); },
                 delegate () { return _cancel; },
-                2);
+                2,
+                12000);
         }
 
         /// <summary>
@@ -1397,21 +1405,30 @@ namespace TomatoBiquga
         /// 只回报"标题含整词"（score ≥ 600）的命中 —— 不能把"按单字沾边"
         /// 的那一堆噪音报成"这个站有"，否则用户白高兴一场。
         ///
-        /// canceled：每扫完一个站就调用一次，返回 true 就立刻收工
-        /// （不影响已经找到的结果）。
-        /// maxHits：找到这么多站就够了，不必把剩下的站都打一遍 ——
-        /// 这趟是**额外**的网络开销，越早收敛越好。
+        /// canceled：每扫完一个站就调用一次，返回 true 就立刻收工。
+        /// maxHits：找到这么多站就够了，不必把剩下的站都打一遍。
+        /// budgetMs：总时间预算。超过就停 —— 这趟是**附加**的网络开销，
+        ///   绝不能让它把一次搜索拖成几分钟（笔趣阁 PC 版单站就可能超时 30 秒）。
         /// </summary>
         internal static List<SiteBookHit> ScanSitesForExact(string kw, string skipSiteKey, Action<string> log)
         {
-            return ScanSitesForExact(kw, skipSiteKey, log, null, 0);
+            return ScanSitesForExact(kw, skipSiteKey, log, null, 0, 0);
         }
 
         internal static List<SiteBookHit> ScanSitesForExact(string kw, string skipSiteKey,
             Action<string> log, Func<bool> canceled, int maxHits)
         {
+            return ScanSitesForExact(kw, skipSiteKey, log, canceled, maxHits, 0);
+        }
+
+        internal static List<SiteBookHit> ScanSitesForExact(string kw, string skipSiteKey,
+            Action<string> log, Func<bool> canceled, int maxHits, int budgetMs)
+        {
             var hits = new List<SiteBookHit>();
             if (string.IsNullOrEmpty(kw)) return hits;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
             foreach (var d in SiteRegistry.All)
             {
                 if (canceled != null && canceled())
@@ -1420,6 +1437,11 @@ namespace TomatoBiquga
                     break;
                 }
                 if (maxHits > 0 && hits.Count >= maxHits) break;
+                if (budgetMs > 0 && sw.ElapsedMilliseconds > budgetMs)
+                {
+                    if (log != null) log("   · 跨站查找已超时（" + (budgetMs / 1000) + " 秒上限），先不找了");
+                    break;
+                }
                 if (string.Equals(d.Key, skipSiteKey, StringComparison.OrdinalIgnoreCase)) continue;
                 if (d.Factory == null) continue;
                 try
@@ -1458,6 +1480,12 @@ namespace TomatoBiquga
                 {
                     if (log != null) log("   · 「" + d.DisplayName + "」搜索失败：" + ex.Message);
                 }
+            }
+            }
+            catch (Exception ex)
+            {
+                // 兜底：这趟是附加服务，任何意外都只记日志，绝不往上抛成弹窗
+                if (log != null) log("   · 跨站查找出错（不影响正常搜索）：" + ex.Message);
             }
             return hits;
         }

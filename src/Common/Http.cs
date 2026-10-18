@@ -427,13 +427,66 @@ namespace TomatoBiquga
                         }
                     }
                     if (attempt < MaxRetries - 1) SleepBackoff(attempt, ex is ThrottledException);
+
+                    // ★ 超时不重试：重试一个已经超时的站点 = 再等一个超时。
+                    //   30 秒 × 3 次 = 90 秒白等（用户看到的就是"卡住然后弹窗"）。
+                    if (ex is TimeoutLikeException)
+                    {
+                        last = ex;
+                        break;
+                    }
                 }
             }
-            throw new Exception(string.Format("请求失败（已重试 {0} 次）：{1}\n  {2}", MaxRetries, Shorten(url),
-                last == null ? "未知错误" : last.Message));
+            // ★ 超时不再报"已重试 N 次"——那会误导用户以为程序很努力，
+            //   其实是白等了 N 个超时周期。如实说清楚。
+            string reason = last == null ? "未知错误" : last.Message;
+            if (last is TimeoutLikeException)
+                throw new Exception(Shorten(url) + "\n  " + reason);
+            throw new Exception(string.Format("请求失败（已重试 {0} 次）：{1}\n  {2}",
+                MaxRetries, Shorten(url), reason));
         }
 
         // ---------------------------------------------------------- 退避与限速自适应
+
+        /// <summary>
+        /// curl 非零退出码 → 人话异常。
+        ///
+        /// ★ 为什么需要：用户报过一个弹窗，上面写着
+        ///   「请求失败（已重试 3 次）：https://www.biquga.com/search.html curl 退出码 28」。
+        ///   "退出码 28" 对用户毫无意义 —— 那是 curl 的 `OPERATION TIMEDOUT`，
+        ///   真实含义是**站点在超时时间内没有响应**（笔趣阁 PC 版实测单次 4.7~13 秒，
+        ///   慢的时候直接超 30 秒）。
+        ///
+        /// ★ 超时**不重试**：重试一个已经超时的站点，等于再等一个超时 ——
+        ///   30 秒 × 3 次 = 90 秒白等，然后才弹窗。用户体感就是"卡死"。
+        ///   所以超时直接失败，由调用方决定要不要换个源。
+        /// </summary>
+        internal static Exception CurlFailure(int exitCode, string stderr)
+        {
+            string detail = string.IsNullOrEmpty(stderr) ? "" : "：" + stderr.Trim();
+            switch (exitCode)
+            {
+                case 28:
+                    return new TimeoutLikeException(
+                        "请求超时 —— 站点在 " + TimeoutSeconds + " 秒内没有响应（站点太慢或网络不通）" + detail);
+                case 6:
+                    return new Exception("域名解析失败（DNS 查不到这个站）" + detail);
+                case 7:
+                    return new Exception("连不上站点（连接被拒绝/被墙）" + detail);
+                case 35:
+                    return new Exception("TLS 握手失败（站点可能只收特定 TLS 版本）" + detail);
+                case 56:
+                    return new Exception("接收数据中断（连接被重置）" + detail);
+                default:
+                    return new Exception("请求失败（curl 退出码 " + exitCode + "）" + detail);
+            }
+        }
+
+        /// <summary>"超时"这一类失败：**不值得重试**（重试只是再等一次超时）。</summary>
+        public class TimeoutLikeException : Exception
+        {
+            public TimeoutLikeException(string msg) : base(msg) { }
+        }
 
         /// <summary>站点限流专用异常：让调用方能区分「限流」和「网络坏了」。</summary>
         public class ThrottledException : Exception
@@ -659,7 +712,7 @@ namespace TomatoBiquga
                         throw new Exception("curl 超时");
                     }
                     if (p.ExitCode != 0)
-                        throw new Exception("curl 退出码 " + p.ExitCode + (string.IsNullOrEmpty(err) ? "" : "：" + err.Trim()));
+                        throw CurlFailure(p.ExitCode, err);
                 }
 
                 if (!File.Exists(tmp)) throw new Exception("curl 没有产生输出文件");

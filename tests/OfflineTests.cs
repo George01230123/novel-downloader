@@ -2661,6 +2661,49 @@ namespace TomatoBiquga
 
             // ---------- 成品 txt 开头不能有一大片空白行 ----------
             TestNoBlankHeaderPad();
+
+            // ---------- 网络失败要说人话，且超时不重试 ----------
+            TestHttpErrorMessages();
+        }
+
+        /// <summary>
+        /// curl 退出码 → 人话，且**超时归为一类可识别的异常**（决定不重试）。
+        ///
+        /// ★ 用户报过一个弹窗：
+        ///   「请求失败（已重试 3 次）：https://www.biquga.com/search.html  curl 退出码 28」
+        ///   两处都不对：
+        ///     ① "退出码 28" 对用户没有意义（那是 curl 的 OPERATION TIMEDOUT）；
+        ///     ② 超时**不该重试** —— 重试一个已经超时的站等于再等一个超时，
+        ///        30 秒 × 3 = 90 秒白等，用户体感就是"卡死然后弹窗"。
+        ///   而且那个 URL 根本不是他选的站点（他选的笔趣阁365），是跨站扫描扫到的慢站。
+        /// </summary>
+        private static void TestHttpErrorMessages()
+        {
+            // ① 超时：必须是可识别的类型（Http 的循环靠它决定 break）
+            var e28 = Http.CurlFailure(28, "");
+            Check("网络：超时映射成 TimeoutLikeException（据此不重试）",
+                e28 is Http.TimeoutLikeException);
+            Check("网络：超时消息是人话（含“超时”）",
+                e28.Message.IndexOf("超时", StringComparison.Ordinal) >= 0);
+            Check("网络：超时消息不再出现“退出码”",
+                e28.Message.IndexOf("退出码", StringComparison.Ordinal) < 0);
+
+            // ② 其他常见退出码也要可读
+            Check("网络：DNS 失败说清原因",
+                Http.CurlFailure(6, "").Message.IndexOf("域名", StringComparison.Ordinal) >= 0);
+            Check("网络：连不上说清原因",
+                Http.CurlFailure(7, "").Message.IndexOf("连不上", StringComparison.Ordinal) >= 0);
+            Check("网络：TLS 失败说清原因",
+                Http.CurlFailure(35, "").Message.IndexOf("TLS", StringComparison.Ordinal) >= 0);
+
+            // ③ 未知退出码：保留原始码和 stderr（排查要靠它）
+            var weird = Http.CurlFailure(999, "boom");
+            Check("网络：未知退出码带上原始码",
+                weird.Message.IndexOf("999", StringComparison.Ordinal) >= 0);
+            Check("网络：未知退出码带上 stderr",
+                weird.Message.IndexOf("boom", StringComparison.Ordinal) >= 0);
+            Check("网络：未知退出码不是 TimeoutLike（该重试还是要重试）",
+                !(weird is Http.TimeoutLikeException));
         }
 
         /// <summary>

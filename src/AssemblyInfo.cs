@@ -23,6 +23,28 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
+// 1.6.3：超时不再白等 90 秒、不再弹"curl 退出码 28"、跨站扫描不再拖垮搜索。
+//        · 现象（用户发来截图）：搜「斗破苍穹」时弹出
+//            「请求失败（已重试 3 次）：https://www.biquga.com/search.html  curl 退出码 28」
+//          而且**他选的站点是笔趣阁365**，报错的却是笔趣阁 PC 版 —— 因为那是
+//          v1.5.8 加的"跨站找书"扫到的慢站。搜索本身没失败，弹窗纯属噪音。
+//        · 三处都错：
+//          ① `curl 退出码 28` 是 curl 的 OPERATION TIMEDOUT，对用户没有意义；
+//          ② **超时也重试 3 次** —— 重试一个已经超时的站等于再等一个超时，
+//             30 秒 × 3 = 90 秒白等，体感就是"卡死然后弹窗"；
+//          ③ 跨站扫描是**附加服务**，它失败却弹成了模态框，把主流程的结果盖住。
+//        · 修法：
+//          ① 加 Http.CurlFailure：退出码 → 人话
+//             （28 超时 / 6 DNS / 7 连不上 / 35 TLS / 其他带原始码 + stderr）；
+//          ② 新增 Http.TimeoutLikeException，重试循环遇到它**直接 break**，
+//             并且最终消息不再写"已重试 N 次"（那是误导）；
+//          ③ 跨站扫描：DoSearch 里套 try/catch（只记日志）、
+//             ScanSitesForExact 整体再套一层兜底、并加 12 秒总预算
+//             （笔趣阁 PC 单站就可能超时 30 秒，4 个站能把一次搜索拖到两分钟）。
+//        · 实测（把超时压到 2 秒打两个必定超时的地址）：耗时 3.5~4.8 秒
+//          （重试 3 次至少要 11 秒），消息为「请求超时 —— 站点在 2 秒内没有响应」。
+//        · 加 9 条断言：超时必须映射成 TimeoutLikeException、消息里不能出现"退出码"、
+//          未知退出码要保留原始码和 stderr（排查靠它）。
 // 1.6.2：成品 txt 开头不再有几百个空白行。
 //        · 现象（用户截图反馈"下载的txt前面不要空这么多行"）：
 //          查他真实下载的《万妖圣祖.txt》（58MB）—— 前 300 行里 **293 行是空的**，
@@ -273,6 +295,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.6.2.0")]
-[assembly: AssemblyFileVersion("1.6.2.0")]
-[assembly: AssemblyInformationalVersion("1.6.2")]
+[assembly: AssemblyVersion("1.6.3.0")]
+[assembly: AssemblyFileVersion("1.6.3.0")]
+[assembly: AssemblyInformationalVersion("1.6.3")]
