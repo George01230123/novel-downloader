@@ -995,17 +995,48 @@ namespace TomatoBiquga
             catch { return false; }
         }
 
+        /// <summary>
+        /// 把「表头 + 补白 + 标记行」拼成**正好 zoneBytes 字节**的一块。
+        ///
+        /// ★ 补白用**行尾空格**，不用换行。
+        ///   起因（用户实测截图反馈"下载的txt前面不要空这么多行"）：
+        ///   原来补白是 `new string('\n', pad)` —— 一个 58MB 的成品 txt 里，
+        ///   前 300 行有 **293 行是空的**，打开文件第一眼就是一大片空白。
+        ///   换成空格接在 46 个等号那一行的末尾：**字节数完全一样**
+        ///   （正文偏移不变，「增量续写」「原位改表头」的所有不变量都保住），
+        ///   但**不会产生空白行** —— 行尾空格在编辑器里看不见，也不影响阅读。
+        ///
+        /// 返回 null 表示"放不下"（调用方应保持原样，绝不越界写）。
+        /// </summary>
+        private static byte[] BuildHeaderZoneBytes(string head, int zoneBytes, Encoding enc)
+        {
+            if (head == null || enc == null) return null;
+            string markerLine = HeaderZoneMarker + ReservedHeaderBytes + "\n";
+            string headNoEol = head.TrimEnd('\r', '\n');
+            string eol = head.Substring(headNoEol.Length);
+            int fixedBytes = enc.GetByteCount(headNoEol) + enc.GetByteCount(eol)
+                           + enc.GetByteCount(markerLine);
+            int pad = zoneBytes - fixedBytes;
+            if (pad < 0) return null;
+            return enc.GetBytes(headNoEol + new string(' ', pad) + eol + markerLine);
+        }
+
         /// <summary>表头 + 补白 + 表头区标记（正文从这之后才开始，所以正文永远不会被表头挤到）</summary>
         internal string BuildHeaderZone()
         {
             var head = BuildHeader();
-            int headBytes = Encoding.UTF8.GetByteCount(head);
-            int pad = ReservedHeaderBytes - headBytes;
+            var enc = Encoding.UTF8;
+            string markerLine = HeaderZoneMarker + ReservedHeaderBytes + "\n";
+            // 标记要**自成一行**：否则增量更新时"往前找行首"会命中补白，
+            // 把「下载时间 / 46 个等号」误当成补白填掉（真实 bug，等号行会消失）。
+            string headNoEol = head.TrimEnd('\r', '\n');
+            string headEol = head.Substring(headNoEol.Length);
+            int fixedBytes = enc.GetByteCount(headNoEol) + enc.GetByteCount(headEol)
+                           + enc.GetByteCount(markerLine);
+            int pad = ReservedHeaderBytes - fixedBytes;
             if (pad < 0) pad = 0;
-            // 末尾那个 '\n' 很关键：让 #header-zone 标记**自成一行**。
-            // 否则标记紧贴在补白后面，增量更新时"往前找行首"会命中补白里的换行，
-            // 把「下载时间 / 46 个等号」两行误当成补白填掉（真实 bug，等号行会消失）。
-            return head + new string('\n', pad) + "\n" + HeaderZoneMarker + ReservedHeaderBytes + "\n";
+            // 补白是**行尾空格**（不是换行）—— 换行会在成品 txt 开头留下几百个空白行。
+            return headNoEol + new string(' ', pad) + headEol + markerLine;
         }
 
         /// <summary>
@@ -1075,26 +1106,19 @@ namespace TomatoBiquga
                 int zoneBytes = markerLineEnd + 1 - bom;         // 要守恒的字节数
                 int markerLineBytes = markerLineEnd + 1 - markerAt;
 
-                var head = BuildHeaderFor(book, chapters, cumulativeOk, skipped, failed);
-                var headBytes = Encoding.UTF8.GetBytes(head);
-                int pad = zoneBytes - headBytes.Length - markerLineBytes;   // 把差额全给补白
-                if (pad < 0) return false;                       // 放不下就整体放弃，绝不越界
+            var head = BuildHeaderFor(book, chapters, cumulativeOk, skipped, failed);
+            // ★ 统一走 BuildHeaderZoneBytes：补白是**行尾空格**而不是换行。
+            //   （原来这里也是写 '\n'，于是每次更新都会把几百个空白行重新填回去。）
+            var block = BuildHeaderZoneBytes(head, zoneBytes, Encoding.UTF8);
+            if (block == null) return false;                 // 放不下就整体放弃，绝不越界
+            if (block.Length != zoneBytes) return false;     // 保险：字节数必须一模一样
 
-                var block = new MemoryStream(zoneBytes);
-                block.Write(headBytes, 0, headBytes.Length);
-                var nl = new byte[Math.Max(0, pad)];
-                for (int i = 0; i < nl.Length; i++) nl[i] = (byte)'\n';
-                block.Write(nl, 0, nl.Length);
-                var tail = Encoding.UTF8.GetBytes(HeaderZoneMarker + ReservedHeaderBytes + "\n");
-                block.Write(tail, 0, tail.Length);
-                if (block.Length != zoneBytes) return false;     // 保险：字节数必须一模一样
-
-                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None))
-                {
-                    fs.Position = bom;
-                    fs.Write(block.GetBuffer(), 0, (int)block.Length);
-                }
-                return true;
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None))
+            {
+                fs.Position = bom;
+                fs.Write(block, 0, block.Length);
+            }
+            return true;
             }
             catch { return false; }
         }
@@ -1188,18 +1212,26 @@ namespace TomatoBiquga
                 return;
             }
 
-            int pad = (hasZone ? zone : cutBytes) - headerBytes.Length;
+            // ★ 补白用**行尾空格**，不用换行 —— 换行会让成品 txt 开头多出几百个空白行
+            //   （用户实测反馈）。字节数照样精确填满到 `zone`，正文偏移因此永远不变。
+            int zoneTarget = hasZone ? zone : cutBytes;
+            var enc = HeaderEncoding();
+            string head = BuildHeader();
+            string headNoEol = head.TrimEnd('\r', '\n');
+            string headEol = head.Substring(headNoEol.Length);
+            int fixedBytes = enc.GetByteCount(headNoEol) + enc.GetByteCount(headEol);
+            int pad = zoneTarget - fixedBytes;
+            if (pad < 0)
+            {
+                Log("注意：新统计放不进表头区，本次不更新文件头统计（正文不受影响）。");
+                return;
+            }
+            var block = enc.GetBytes(headNoEol + new string(' ', pad) + headEol);
+            if (block.Length != zoneTarget) return;      // 保险：必须正好填满
             using (var fs = new FileStream(OutputFile, FileMode.Open, FileAccess.Write, FileShare.None))
             {
                 fs.Position = bom;
-                fs.Write(headerBytes, 0, headerBytes.Length);
-                // 补白把表头区填满，正文位置因此永远不变
-                if (pad > 0)
-                {
-                    var padBytes = new byte[pad];
-                    for (int i = 0; i < pad; i++) padBytes[i] = (byte)'\n';
-                    fs.Write(padBytes, 0, padBytes.Length);
-                }
+                fs.Write(block, 0, block.Length);
             }
         }
 

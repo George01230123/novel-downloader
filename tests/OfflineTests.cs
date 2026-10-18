@@ -2658,6 +2658,59 @@ namespace TomatoBiquga
 
             // ---------- 地址直连（输入框写着"书名 / 链接"，得真的认链接）----------
             TestAddressIntake();
+
+            // ---------- 成品 txt 开头不能有一大片空白行 ----------
+            TestNoBlankHeaderPad();
+        }
+
+        /// <summary>
+        /// 成品 txt 的**开头不能有一大片空白行**。
+        ///
+        /// ★ 用户实测截图反馈："下载的txt前面不要空这么多行"。
+        ///   查他的真实文件：58MB 的《万妖圣祖.txt》，前 300 行里 **293 行是空的** ——
+        ///   第 8 行开始全是空白，正文要到几百行之后才开始。
+        ///
+        ///   根因：为了让「收尾原位改表头」永远有地方写，表头后面预留了
+        ///   ReservedHeaderBytes(2048) 字节，而补白用的是 `new string('\n', pad)`。
+        ///   一个换行就是一个空行 —— 于是每本书开头都有几百行空白。
+        ///
+        ///   修法：补白改成**行尾空格**。字节数完全守恒（正文偏移不变，
+        ///   增量续写 / 原位改表头的所有不变量都保住），但不再产生空白行。
+        ///
+        ///   这条测试直接量表头区的空行数：谁把补白改回换行就会立刻失败。
+        /// </summary>
+        private static void TestNoBlankHeaderPad()
+        {
+            var book = new BookInfo
+            {
+                Site = "xbiquwk",
+                Title = "空白行检查用书",
+                Author = "作者",
+                Url = "http://x/1_1/",
+                Dir = "/1_1/",
+                Desc = new string('简', 120),          // 让表头接近上限，逼出补白
+            };
+            var r = new DownloadRunner { Book = book };
+            r.Chapters.Add(new ChapterInfo { Id = "1", Title = "第一章" });
+            string zone = r.BuildHeaderZone();
+            Check("表头区：能生成", !string.IsNullOrEmpty(zone));
+
+            // 数空行（只含空白字符、但确实有内容的行）
+            int blank = 0;
+            foreach (string line in zone.Replace("\r\n", "\n").Split('\n'))
+                if (line.Length > 0 && line.Trim().Length == 0) blank++;
+            Eq("表头区：补白不产生空白行（改回换行会立刻失败）", 0, blank);
+
+            // 整个表头区（含标记行）正好 = 预留字节数 —— 正文起点因此是常量
+            int zoneBytes = Encoding.UTF8.GetByteCount(zone);
+            Eq("表头区：总字节数 = 预留字节（标记行也算在里，守恒）",
+                DownloadRunner.ReservedHeaderBytes, zoneBytes);
+
+            // 补白必须是空格
+            Check("表头区：补白用的是空格",
+                zone.IndexOf(new string(' ', 20), StringComparison.Ordinal) > 0);
+            Check("表头区：46 个等号后面不紧跟空白行",
+                zone.IndexOf(new string('=', 46) + "\r\n\r\n", StringComparison.Ordinal) < 0);
         }
 
         /// <summary>

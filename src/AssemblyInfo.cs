@@ -23,6 +23,29 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
+// 1.6.2：成品 txt 开头不再有几百个空白行。
+//        · 现象（用户截图反馈"下载的txt前面不要空这么多行"）：
+//          查他真实下载的《万妖圣祖.txt》（58MB）—— 前 300 行里 **293 行是空的**，
+//          第 8 行开始全是空白，正文要到几百行之后才开始。
+//        · 根因：为了让「收尾原位改表头」永远有地方写，表头后面预留
+//          ReservedHeaderBytes(2048) 字节，而补白用的是 `new string('\n', pad)`。
+//          一个换行就是一个空行 → 每本书开头都有几百行空白。
+//          而 FixHeaderNow / InjectHeaderStatistics 每次还会把补白**重新填满**，
+//          所以"收尾时裁掉"没用 —— 下次更新又长回来。
+//        · 修法：补白从**换行**改成**行尾空格**。
+//          字节数完全守恒（正文偏移不变，增量续写 / 原位改表头的所有不变量都保住），
+//          但空格不占版面，不产生空白行。
+//          三处统一：BuildHeaderZone / FixHeaderNow / InjectHeaderStatistics。
+//        · 实测（真实下载 3 章）：开头空行 293 → **10**，
+//          剩下的 10 行是章节之间本来就有的空行（每章 2 行分隔）。
+//        · 中途走错的两条路，记下来免得再犯：
+//          ① 先试"收尾时把补白整段删掉（CompactHeaderZone）"—— 正文偏移会变，
+//             而且之后「补齐缺章」找不到 #header-zone 标记，累计统计永远停在旧值
+//             （离线单测当场抓到：期望累计 10 章、实际停在本轮 7 章）；
+//          ② 又试"没有标记就整文件重写表头"—— 把 GBK 文件写成了 UTF-8 表头，
+//             编码测试挂掉。两条都回退了。最后选"换行→空格"这个不改变任何
+//             不变量的做法，1455/1455 全绿。
+//        · 加 5 条断言：表头区空行数必须为 0、字节数守恒、补白必须是空格。
 // 1.6.1：搜索修 6 处（用户报"搜索有很多问题"）。
 //        · ① 作者/字数/状态全被丢掉 —— 结果列表「作者」列**永远是空的**。
 //            站点其实给了，只是 RuleSite.Search 当年只抠了"链接 + 书名"。实测笔尖中文：
@@ -250,6 +273,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.6.1.0")]
-[assembly: AssemblyFileVersion("1.6.1.0")]
-[assembly: AssemblyInformationalVersion("1.6.1")]
+[assembly: AssemblyVersion("1.6.2.0")]
+[assembly: AssemblyFileVersion("1.6.2.0")]
+[assembly: AssemblyInformationalVersion("1.6.2")]
