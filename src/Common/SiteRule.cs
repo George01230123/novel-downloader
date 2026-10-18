@@ -78,6 +78,33 @@ namespace TomatoBiquga
         /// </summary>
         public bool SearchResultMustContainKeyword;
 
+        /// <summary>
+        /// 搜索结果所在表格行里，**作者在第几列**（0 基，和结果行里的 `&lt;td&gt;` 顺序一致）。
+        /// -1 = 这一站没这列 / 不知道。
+        ///
+        /// ★ 为什么需要：以前 `RuleSite.Search` 只从结果页里抠出"链接 + 书名"，
+        ///   作者、字数、状态、最新章节**全都丢掉了** —— 于是结果列表的
+        ///   「作者」列永远是空的，用户抱怨"连是谁写的都看不到"。
+        ///   而站点其实是给了的。实测笔尖中文（2026-10-18）：
+        ///     &lt;td class="odd"&gt;&lt;a href="/35_35050/"&gt;圣妖之祖&lt;/a&gt;&lt;/td&gt;   ← 0 书名
+        ///     &lt;td class="even"&gt;&lt;a ...&gt;第一百六十三章&lt;/a&gt;&lt;/td&gt;            ← 1 最新章节
+        ///     &lt;td class="odd"&gt;灯鱼&lt;/td&gt;                                  ← 2 作者 ✓
+        ///     &lt;td class="even"&gt;758K&lt;/td&gt;                                 ← 3 字数
+        ///     &lt;td class="odd"&gt;17-08-05&lt;/td&gt;                              ← 4 更新
+        ///     &lt;td class="even"&gt;连载&lt;/td&gt;                                 ← 5 状态
+        ///   所以笔尖中文填 2。
+        ///
+        /// ★ 不要靠"猜第几列是作者"的启发式（比如"最短的那格"）：
+        ///   连载/完本、字数、日期都很短，会误判，而且错得很隐蔽。
+        /// </summary>
+        public int SearchAuthorColumn = -1;
+
+        /// <summary>
+        /// 结果行里这些列要不要拼进「备注」（字数、状态、更新时间那类）。
+        /// 空 = 不拼。拼之前会去掉书名列和作者列。
+        /// </summary>
+        public int[] SearchDescColumns;
+
         // ---------------- 详情页 ----------------
 
         public string BookTitlePattern;       // 捕获组 1 = 书名

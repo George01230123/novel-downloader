@@ -115,15 +115,86 @@ namespace TomatoBiquga
                 try { title = BookTitleFromSearch(html, link); } catch { }
                 if (string.IsNullOrEmpty(title)) title = "（载入后取书名）";
 
+                // ★ 从**这一行**里把作者/字数/状态抠出来。
+                //   以前这里只留了书名，作者永远空 —— 用户抱怨"连是谁写的都看不到"，
+                //   而站点其实给了（见 SiteRule.SearchAuthorColumn 的注释）。
+                var row = CellsOfResultRow(html, link);
+                string author = PickCell(row, _r.SearchAuthorColumn);
+                string desc = BuildDesc(row, _r.SearchDescColumns);
+
                 result.Add(new BookInfo
                 {
                     Site = _r.Key,
                     Title = title,
+                    Author = author,
+                    Desc = desc,
                     Dir = PathOf(abs),
                     Url = abs,
                 });
             }
             return result;
+        }
+
+        /// <summary>
+        /// 取"包含这个书籍链接的那一行"里的所有单元格纯文本。
+        ///
+        /// 做法：先定位 href 在这次搜索页里的位置，再向**前**找最近的 `&lt;tr`、
+        /// 向**后**找最近的 `&lt;/tr&gt;`，把这中间的所有 `&lt;td&gt;…&lt;/td&gt;` 抽成文本。
+        /// 不做整页解析：站点结构五花八门，而"链接所在的那一行"是共通的。
+        /// 拿不到就返回空表 —— 调用方会把作者留空，不会崩。
+        /// </summary>
+        private List<string> CellsOfResultRow(string html, string href)
+        {
+            var cells = new List<string>();
+            if (string.IsNullOrEmpty(html) || string.IsNullOrEmpty(href)) return cells;
+            try
+            {
+                int at = html.IndexOf("href=\"" + href + "\"", StringComparison.OrdinalIgnoreCase);
+                if (at < 0) at = html.IndexOf(href, StringComparison.OrdinalIgnoreCase);
+                if (at < 0) return cells;
+
+                int trStart = html.LastIndexOf("<tr", at, StringComparison.OrdinalIgnoreCase);
+                if (trStart < 0) return cells;
+                int trEnd = html.IndexOf("</tr>", at, StringComparison.OrdinalIgnoreCase);
+                if (trEnd < 0) trEnd = Math.Min(html.Length, at + 4000);
+                string rowHtml = html.Substring(trStart, trEnd - trStart);
+
+                foreach (Match m in Regex.Matches(rowHtml, "<td[^>]*>([\\s\\S]*?)</td>",
+                                                  RegexOptions.IgnoreCase))
+                {
+                    string t = Http.StripTags(m.Groups[1].Value);
+                    t = Regex.Replace(t, "\\s+", " ").Trim();
+                    cells.Add(t);
+                }
+            }
+            catch { }
+            return cells;
+        }
+
+        /// <summary>按下标取单元格；下标非法就返回空串（不是 null，列表列更整齐）</summary>
+        private static string PickCell(List<string> cells, int index)
+        {
+            if (cells == null || index < 0 || index >= cells.Count) return "";
+            string v = cells[index];
+            if (string.IsNullOrEmpty(v)) return "";
+            if (v.Length > 40) v = v.Substring(0, 40);
+            return v;
+        }
+
+        /// <summary>把指定列拼成备注，例如「758K · 连载 · 17-08-05」</summary>
+        private static string BuildDesc(List<string> cells, int[] cols)
+        {
+            if (cells == null || cols == null || cols.Length == 0) return "";
+            var parts = new List<string>();
+            foreach (int i in cols)
+            {
+                string v = PickCell(cells, i);
+                if (v.Length == 0) continue;
+                parts.Add(v);
+            }
+            string s = string.Join(" · ", parts.ToArray());
+            if (s.Length > 80) s = s.Substring(0, 80);
+            return s;
         }
 
         /// <summary>POST 表单体：字段值里的 %s 换成关键词，其余按 urlencoded 拼</summary>

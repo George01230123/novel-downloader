@@ -1847,6 +1847,32 @@ namespace TomatoBiquga
 
             // 清空收尾，别把测试数据留在用户的索引文件里
             SearchIndex.Clear();
+
+            // ---------- 搜索结果作者/备注 要能存进缓存再取回来 ----------
+            // ★ 起因：以前 RuleSite.Search 只抠书名，作者列永远是空的（用户抱怨
+            //   "连是谁写的都看不到"）。补上作者后，如果缓存不带这两个字段，
+            //   命中缓存时又会变回空白 —— 那等于没修。
+            var withMeta = new List<BookInfo>
+            {
+                new BookInfo
+                {
+                    Site = "xbiquwk", Title = "圣妖之祖", Author = "灯鱼",
+                    Desc = "758K · 连载 · 17-08-05", Url = "http://x/35_35050/",
+                    Dir = "/35_35050/",
+                },
+            };
+            SearchIndex.PutQuery("圣妖之祖", withMeta, "xbiquwk");
+            var backMeta = SearchIndex.GetQuery("圣妖之祖", "xbiquwk");
+            Check("索引：命中刚才存的查询", backMeta != null && backMeta.Count == 1);
+            if (backMeta != null && backMeta.Count == 1)
+            {
+                Eq("索引：缓存回读保留作者", "灯鱼", backMeta[0].Author);
+                Eq("索引：缓存回读保留备注", "758K · 连载 · 17-08-05", backMeta[0].Desc);
+            }
+            // 换站点必须查不到（否则会拿 A 站的书去请求 B 站）
+            Check("索引：换站点后不命中", SearchIndex.GetQuery("圣妖之祖", "biquga") == null);
+
+            SearchIndex.Clear();
             Eq("索引：收尾清空", 0, SearchIndex.BookCount);
         }
 
@@ -2629,6 +2655,62 @@ namespace TomatoBiquga
 
             // ---------- 批量抓取的安全前提（性能优化的正确性闸门）----------
             TestBatchFetchSafety();
+
+            // ---------- 地址直连（输入框写着"书名 / 链接"，得真的认链接）----------
+            TestAddressIntake();
+        }
+
+        /// <summary>
+        /// 输入框上写的是「书名 / 链接」，但 `AddressIntake` 这个能力
+        /// **声明了全项目没人检查** —— 粘链接其实不工作，等于拿整条 URL 当关键词搜。
+        ///
+        /// 这里钉住三件事：
+        ///   ① 什么算"地址"（只管 http/https，别把普通书名当地址）
+        ///   ② 章节地址要归一成书籍地址（用户复制的是"当前这一章"的地址）
+        ///   ③ 按域名能认出站点；不认识的域名要老实返回 null，不能瞎猜
+        /// </summary>
+        private static void TestAddressIntake()
+        {
+            // ① 什么算地址
+            Check("地址：http 开头算地址", MainForm.LooksLikeBookAddress("http://www.xbiquwk.com/11_11763/"));
+            Check("地址：https 开头算地址", MainForm.LooksLikeBookAddress("https://www.biquga.com/17_17084/"));
+            Check("地址：大写 HTTP 也算", MainForm.LooksLikeBookAddress("HTTP://x/1/"));
+            Check("地址：普通书名不算地址", !MainForm.LooksLikeBookAddress("万妖圣祖"));
+            Check("地址：书名里带 http 字样但不开头不算", !MainForm.LooksLikeBookAddress("看http的书"));
+            Check("地址：空串不算地址", !MainForm.LooksLikeBookAddress(""));
+            Check("地址：null 不算地址", !MainForm.LooksLikeBookAddress(null));
+
+            // ② 章节地址 → 书籍地址（最容易踩：用户复制的是正在看的那一章）
+            Eq("地址：章节页归一为书籍页",
+                "http://www.xbiquwk.com/11_11763/",
+                MainForm.NormalizeBookUrl("http://www.xbiquwk.com/11_11763/7394980.html"));
+            Eq("地址：书籍页保持不变",
+                "http://www.xbiquwk.com/11_11763/",
+                MainForm.NormalizeBookUrl("http://www.xbiquwk.com/11_11763/"));
+            Eq("地址：没有末尾斜杠会补上",
+                "https://www.biquga.com/17_17084/",
+                MainForm.NormalizeBookUrl("https://www.biquga.com/17_17084"));
+            Eq("地址：去掉查询串",
+                "http://x/11_11763/",
+                MainForm.NormalizeBookUrl("http://x/11_11763/?from=list"));
+            Eq("地址：去掉锚点",
+                "http://x/11_11763/",
+                MainForm.NormalizeBookUrl("http://x/11_11763/#top"));
+            Eq("地址：.htm 也当章节页",
+                "http://x/11_11763/",
+                MainForm.NormalizeBookUrl("http://x/11_11763/7394980.htm"));
+            Eq("地址：空串归一成空串", "", MainForm.NormalizeBookUrl(""));
+
+            // ③ 按域名认站点
+            var d1 = MainForm.MatchSiteForUrl("http://www.xbiquwk.com/11_11763/");
+            Check("地址：认得出笔尖中文", d1 != null && d1.Key == "xbiquwk");
+            var d2 = MainForm.MatchSiteForUrl("https://www.biquga.com/17_17084/");
+            Check("地址：认得出笔趣阁", d2 != null && d2.Key == "biquga");
+            Check("地址：不认识的域名返回 null",
+                MainForm.MatchSiteForUrl("https://www.example.com/1_2/") == null);
+            Check("地址：乱写的字符串返回 null",
+                MainForm.MatchSiteForUrl("不是网址") == null);
+            Check("地址：null 返回 null", MainForm.MatchSiteForUrl(null) == null);
         }
 
         /// <summary>

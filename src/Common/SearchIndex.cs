@@ -87,6 +87,8 @@ namespace TomatoBiquga
             public string url { get; set; }
             public string dir { get; set; }
             public string bookId { get; set; }
+            /// <summary>备注：字数 · 状态 · 更新时间（v1.6.1 新增，见 SiteRule.SearchDescColumns）</summary>
+            public string desc { get; set; }
             public string savedAt { get; set; }
             /// <summary>归一化后的书名，用于匹配（省得每次现算）</summary>
             public string key { get; set; }
@@ -102,6 +104,7 @@ namespace TomatoBiquga
                     Url = url ?? "",
                     Dir = dir ?? "",
                     BookId = bookId ?? "",
+                    Desc = desc ?? "",
                 };
             }
 
@@ -116,6 +119,7 @@ namespace TomatoBiquga
                     url = b.Url ?? "",
                     dir = b.Dir ?? "",
                     bookId = b.BookId ?? "",
+                    desc = b.Desc ?? "",
                     savedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
                 };
                 e.key = Normalize(e.title);
@@ -127,7 +131,20 @@ namespace TomatoBiquga
         {
             public List<QueryHit> queries { get; set; }
             public List<Entry> books { get; set; }
+
+            /// <summary>
+            /// 缓存格式版本。**读到老版本就整份丢弃**（当作没有缓存）。
+            ///
+            /// ★ 为什么需要：v1.6.1 给搜索结果补上了作者/备注字段。
+            ///   老缓存里 author 是空串（当年 RuleSite 根本不填作者），
+            ///   继续用的话用户升到新版本后**仍然看不到作者** ——
+            ///   还会以为"改了半天没用"。字段补全后老数据像 bug，宁可让用户重搜一次。
+            /// </summary>
+            public int version { get; set; }
         }
+
+        /// <summary>当前缓存格式版本。加/改字段就 +1。</summary>
+        internal const int SchemaVersion = 2;
 
         private static readonly object _lock = new object();
         private static Store _cache;
@@ -140,7 +157,7 @@ namespace TomatoBiquga
             lock (_lock)
             {
                 if (_cache != null) return _cache;
-                var s = new Store { queries = new List<QueryHit>(), books = new List<Entry>() };
+                var s = new Store { queries = new List<QueryHit>(), books = new List<Entry>(), version = SchemaVersion };
                 try
                 {
                     if (File.Exists(FilePath))
@@ -149,8 +166,18 @@ namespace TomatoBiquga
                         var parsed = new JavaScriptSerializer().Deserialize<Store>(json);
                         if (parsed != null)
                         {
+                            // ★ 版本不符：整份丢弃（见 Store.version 的注释）。
+                            //   不删文件，Save 时会被新格式覆盖。
+                            if (parsed.version != SchemaVersion)
+                            {
+                                Log.Line("搜索索引格式版本不符（文件 " + parsed.version
+                                    + " / 程序 " + SchemaVersion + "），已忽略旧缓存并重建。文件=" + FilePath);
+                            }
+                            else
+                            {
                             if (parsed.queries != null) s.queries = parsed.queries;
                             if (parsed.books != null) s.books = parsed.books;
+                            }
                         }
                     }
                 }

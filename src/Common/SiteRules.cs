@@ -118,6 +118,11 @@ namespace TomatoBiquga
                     "<td class=\"odd\"><a href=\"(/\\d+_\\d+/)\"[^>]*>",
                     "<a href=\"(/\\d+_\\d+/)\"",
                 },
+                // 搜索表格的列序（实测 2026-10-18）：
+                //   0 书名 | 1 最新章节 | 2 作者 | 3 字数 | 4 更新 | 5 状态
+                // 以前只取了书名，作者/字数/状态全被丢掉 → 结果列表「作者」列永远是空的。
+                SearchAuthorColumn = 2,
+                SearchDescColumns = new[] { 3, 5, 4 },   // 字数 · 状态 · 更新
 
                 // 书名/作者/封面/简介全在 og: 元信息里，比抓 #info 的 DOM 稳
                 BookTitlePattern = "og:novel:book_name\"\\s+content=\"([^\"]*)\"",

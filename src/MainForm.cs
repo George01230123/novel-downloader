@@ -1150,11 +1150,106 @@ namespace TomatoBiquga
             }
         }
 
+        /// <summary>输入看起来是不是一个书籍地址（http/https 开头）</summary>
+        internal static bool LooksLikeBookAddress(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            s = s.Trim();
+            return s.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                || s.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// 把"某一章的地址"归一成"书籍主页地址"：
+        ///   http://x/11_11763/7394980.html → http://x/11_11763/
+        ///   末尾补斜杠；去掉 ?query 和 #hash。
+        ///
+        /// ★ 为什么要这一步：用户复制的一般是浏览器地址栏里**当前正在看的那一章**，
+        ///   而不是书籍主页。直接拿章节页去 LoadBook，解析出的是章节内容、没有目录。
+        /// </summary>
+        internal static string NormalizeBookUrl(string url)
+        {
+            if (string.IsNullOrEmpty(url)) return "";
+            string s = url.Trim();
+            int q = s.IndexOfAny(new[] { '?', '#' });
+            if (q >= 0) s = s.Substring(0, q);
+            // 最后一段是 xxx.html / xxx.htm → 砍掉，回到书籍目录
+            var m = System.Text.RegularExpressions.Regex.Match(
+                s, "^(.*/)[^/]*\\.html?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (m.Success) s = m.Groups[1].Value;
+            if (!s.EndsWith("/", StringComparison.Ordinal)) s += "/";
+            return s;
+        }
+
+        /// <summary>按域名找站点描述；没有对得上的返回 null</summary>
+        internal static SiteDescriptor MatchSiteForUrl(string url)
+        {
+            if (string.IsNullOrEmpty(url)) return null;
+            Uri parsed;
+            try { parsed = new Uri(url.Trim()); }
+            catch { return null; }
+            foreach (var d in SiteRegistry.All)
+            {
+                if (string.IsNullOrEmpty(d.DefaultBase)) continue;
+                Uri b;
+                try { b = new Uri(d.DefaultBase); }
+                catch { continue; }
+                if (string.Equals(parsed.Host, b.Host, StringComparison.OrdinalIgnoreCase)) return d;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 尝试把输入当书籍地址打开。**成功接管返回 true**（调用方不要再走搜索）。
+        /// 只接管规则站；其他站点或不认识的域名返回 false，让原流程继续。
+        /// </summary>
+        private bool TryOpenByAddress(string url)
+        {
+            var d = MatchSiteForUrl(url);
+            if (d == null)
+            {
+                Log("「" + url + "」看起来是个链接，但没有已注册站点的域名对得上，仍按关键词搜索。");
+                return false;
+            }
+            ISite s;
+            try { s = d.Factory(); }
+            catch { return false; }
+            if (!(s is RuleSite)) return false;      // 只接管规则站，别抢其他站的处理权
+
+            string bookUrl = NormalizeBookUrl(url);
+            var book = new BookInfo
+            {
+                Site = d.Key,
+                Url = bookUrl,
+                Dir = RuleSite.PathOf(bookUrl),
+                Title = "",
+            };
+            Log("按地址直连：" + d.DisplayName + "  " + bookUrl
+                + (string.Equals(bookUrl, url.Trim(), StringComparison.OrdinalIgnoreCase)
+                   ? "" : "（已从章节地址归一为书籍地址）"));
+            SetBooksBarText("按地址直连：" + bookUrl + "（正在载入目录）");
+            var site2 = s;
+            var book2 = book;
+            RunBackground("载入目录中…", () => DoLoadBookCore(book2, site2));
+            return true;
+        }
+
         private void DoSearch()
         {
             if (_busy) { BusyNotice(Text); return; }
             var kw = txtKeyword.Text.Trim();
             if (kw.Length == 0) { MessageBox.Show("请输入书名或链接"); return; }
+
+            // ★ 输入是**书籍地址**时直接载入目录，不再当关键词去搜。
+            //
+            //   起因：输入框上写着「书名 / 链接」，而 `SiteCapabilities.AddressIntake`
+            //   这个能力**声明了却全项目没有任何地方检查** —— 又是一处死代码。
+            //   所以粘一个链接进来按搜索，等于"拿整条 URL 当关键词去站内搜"，
+            //   结果自然乱七八糟。
+            //
+            //   只对规则站生效：它们的 LoadBook 只要 Url 就能工作、路径规则也统一；
+            //   其他站点保持原样（万一它们自己的 Search 已经认地址，不能抢权）。
+            if (LooksLikeBookAddress(kw) && TryOpenByAddress(kw)) return;
 
             var site = _site;
             // 本次搜索实际用的站点 Key —— 缓存要按站点分开存，否则切站后会
@@ -1173,8 +1268,11 @@ namespace TomatoBiquga
                 }
 
                 var list = site.Search(kw, Log);
+                // ★ 站点实现有可能返回 null（比如被限流时直接放弃）。
+                //   以前这里直接 `list.Count` → 空引用，用户看到的是"搜索崩了"而不是"没搜到"。
+                if (list == null) list = new List<BookInfo>();
                 // ② 结果落盘：这次搜索下次能重放，同时把书并进累积索引
-                if (list != null && list.Count > 0) SearchIndex.PutQuery(kw, list, searchSiteKey);
+                if (list.Count > 0) SearchIndex.PutQuery(kw, list, searchSiteKey);
                 FillBooks(list, kw);
                 if (list.Count == 0)
                 {
@@ -1220,8 +1318,7 @@ namespace TomatoBiquga
                 {
                     Log("⚠ 「" + SiteRegistry.LabelOf(searchSiteKey) + "」返回的 " + list.Count
                         + " 条里没有一条标题含「" + kw + "」—— 换个源找找看…");
-                    var hits = ScanOtherSitesForExact(kw, searchSiteKey);
-                    if (hits != null && hits.Count > 0)
+                    var hits = ScanOtherSitesForExact(kw, searchSiteKey);                    if (hits != null && hits.Count > 0)
                     {
                         foreach (var h in hits)
                             Log("   · 「" + h.SiteLabel + "」有：" + h.Book.Title
@@ -1285,7 +1382,13 @@ namespace TomatoBiquga
         private List<SiteBookHit> ScanOtherSitesForExact(string kw, string skipSiteKey)
         {
             if (_cancel) return new List<SiteBookHit>();
-            return ScanSitesForExact(kw, skipSiteKey, delegate (string s) { Log(s); });
+            // ★ 把取消回调**传进去**。以前只在这一趟开始前查一次 _cancel，
+            //   一旦开始扫，用户点「取消」要等 4 个站跑完（每站最长 30 秒 × 重试）
+            //   才停下来 —— 界面像是卡死了。现在每扫完一个站就检查一次。
+            return ScanSitesForExact(kw, skipSiteKey,
+                delegate (string s) { Log(s); },
+                delegate () { return _cancel; },
+                2);
         }
 
         /// <summary>
@@ -1293,13 +1396,30 @@ namespace TomatoBiquga
         ///
         /// 只回报"标题含整词"（score ≥ 600）的命中 —— 不能把"按单字沾边"
         /// 的那一堆噪音报成"这个站有"，否则用户白高兴一场。
+        ///
+        /// canceled：每扫完一个站就调用一次，返回 true 就立刻收工
+        /// （不影响已经找到的结果）。
+        /// maxHits：找到这么多站就够了，不必把剩下的站都打一遍 ——
+        /// 这趟是**额外**的网络开销，越早收敛越好。
         /// </summary>
         internal static List<SiteBookHit> ScanSitesForExact(string kw, string skipSiteKey, Action<string> log)
+        {
+            return ScanSitesForExact(kw, skipSiteKey, log, null, 0);
+        }
+
+        internal static List<SiteBookHit> ScanSitesForExact(string kw, string skipSiteKey,
+            Action<string> log, Func<bool> canceled, int maxHits)
         {
             var hits = new List<SiteBookHit>();
             if (string.IsNullOrEmpty(kw)) return hits;
             foreach (var d in SiteRegistry.All)
             {
+                if (canceled != null && canceled())
+                {
+                    if (log != null) log("   · 已取消跨站查找");
+                    break;
+                }
+                if (maxHits > 0 && hits.Count >= maxHits) break;
                 if (string.Equals(d.Key, skipSiteKey, StringComparison.OrdinalIgnoreCase)) continue;
                 if (d.Factory == null) continue;
                 try

@@ -23,6 +23,36 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
+// 1.6.1：搜索修 6 处（用户报"搜索有很多问题"）。
+//        · ① 作者/字数/状态全被丢掉 —— 结果列表「作者」列**永远是空的**。
+//            站点其实给了，只是 RuleSite.Search 当年只抠了"链接 + 书名"。实测笔尖中文：
+//              <td class="odd"><a href="/35_35050/">圣妖之祖</a></td>   0 书名
+//              <td class="even"><a ...>第一百六十三章</a></td>          1 最新章节
+//              <td class="odd">灯鱼</td>                                2 作者 ✓
+//              <td class="even">758K</td>                               3 字数 ✓
+//              <td class="odd">17-08-05</td>                            4 更新 ✓
+//              <td class="even">连载</td>                               5 状态 ✓
+//            修法：SiteRule 加 SearchAuthorColumn / SearchDescColumns，
+//            RuleSite 按"书籍链接所在的那一行"取所有 <td>，填 Author 和 Desc。
+//            实测：50/50 条全部带作者（「758K · 连载 · 20-05-06」这种备注也有了）。
+//            不用"最短的那格是作者"这种启发式：连载/完本、字数、日期都很短，会误判。
+//        · ② 输入框写着「书名 / 链接」，但 SiteCapabilities.AddressIntake
+//            **声明了全项目没有任何地方检查** —— 又是一处死代码，粘链接不工作
+//            （等于拿整条 URL 当关键词去站内搜）。修法：识别 http(s) 地址 → 按域名
+//            匹配站点 → 直接 LoadBook 载入目录；并且把**章节页归一成书籍页**
+//            （用户复制的一般是"当前这一章"的地址）。
+//            实测：给一条章节地址就载入出《万相之王》1838 章、作者天蚕土豆。
+//            只对规则站接管，其他站点保持原行为（万一它们自己认地址，不抢权）。
+//        · ③ 搜索索引加了 schemaVersion。老缓存里 author 是空串（当年根本没填），
+//            不失效的话用户升级后**仍然看不到作者**，会以为"改了没用"。
+//            版本不符就整份丢弃并写一行日志说明。
+//        · ④ 缓存 Entry 补 desc 字段 —— 否则字数/状态命中缓存后又变空白（等于白修）。
+//        · ⑤ site.Search 返回 null 时 `list.Count` 会空引用 → 用户看到"搜索崩了"
+//            而不是"没搜到"。补 null 归一。
+//        · ⑥ 跨站找书的扫描**不可取消**（我自己在 v1.5.8 引入的）：只在这一趟开始前
+//            查过 _cancel，开始后点「取消」要等 4 个站跑完（每站最长 30 秒×重试），
+//            界面像卡死。改成每扫完一个站检查一次，并且找到 2 个站就收工。
+//        · 加 23 条断言（缓存作者/备注往返、换站点不命中、地址识别/归一/匹配域名）。
 // 1.6.0：下载提速 1.55 倍（连接复用）—— 把"死代码"批量路径真正启用起来。
 //        · 起因（用户要求"优化性能、让程序更精简速度更快"），先量化再动手：
 //            启动 0.4~0.6 秒（没问题）
@@ -220,6 +250,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.6.0.0")]
-[assembly: AssemblyFileVersion("1.6.0.0")]
-[assembly: AssemblyInformationalVersion("1.6.0")]
+[assembly: AssemblyVersion("1.6.1.0")]
+[assembly: AssemblyFileVersion("1.6.1.0")]
+[assembly: AssemblyInformationalVersion("1.6.1")]
