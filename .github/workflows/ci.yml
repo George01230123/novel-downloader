@@ -65,6 +65,15 @@ jobs:
             throw "layout probe reported problems (exit $LASTEXITCODE)"
           }
 
+      # 文字能不能放得下：每个按钮/标签的中文有没有被裁掉或变成方框。
+      # 这一步以前只在本地门禁里跑，CI 漏了它 —— 而"中日韩字形缺失"这类问题
+      # 恰恰是**换台机器才暴露**的（字体装了没有因人而异），最该在 CI 里守。
+      - name: Check text fits (no clipped / tofu CJK glyphs)
+        shell: pwsh
+        run: |
+          ./dist/_textfit.exe
+          if ($LASTEXITCODE -ne 0) { throw "text fit check failed (exit $LASTEXITCODE)" }
+
       - name: Check exe was produced
         shell: pwsh
         run: |

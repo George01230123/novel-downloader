@@ -50,6 +50,14 @@ namespace TomatoBiquga
             Record(name, ok, ok ? "" : "条件不成立");
         }
 
+        /// <summary>
+        /// 崩溃记录（见 Run 里 AppDomain.UnhandledException 那段）。
+        /// 进程被 Windows 直接干掉时它是 null；只有"别的线程抛了托管异常"才用得上。
+        /// </summary>
+        private static string _crashNote;
+
+        /// <summary>每这么多条断言打一行心跳（真崩了，最后一行就是"崩在哪一段"）</summary>
+        private const int HeartbeatEvery = 100;
         /// <summary>断言相等（失败时打印 期望/实际）</summary>
         private static void Eq<T>(string name, T expect, T actual)
         {
@@ -86,6 +94,17 @@ namespace TomatoBiquga
                 if (line.Length > 600) line = line.Substring(0, 600) + "…（消息过长已截断）";
                 Console.WriteLine(line);
                 Failures.Add(line);
+            }
+
+            // ★ 心跳：每 100 条打一行。
+            //   为什么：进程被 Windows 直接干掉（"无法创建新的堆栈防护页面"那种）
+            //   是托管异常抓不到的 —— 那时日志里唯一线索就是**最后一条心跳**，
+            //   它能告诉我们"崩在第几条断言附近"，再对照测试顺序就能定位到哪一段。
+            if ((_pass + _fail) % HeartbeatEvery == 0)
+            {
+                try { Console.WriteLine(string.Format("[心跳] 已跑 {0} 条断言（通过 {1}，失败 {2}）",
+                    _pass + _fail, _pass, _fail)); }
+                catch { }
             }
         }
 
@@ -185,6 +204,53 @@ namespace TomatoBiquga
             //     路径），还切**控制台输出代码页**（真实控制台那条路径）。
             //     原来只做前者，于是用户在 cmd 里跑 --selftest 看到的中文全是乱码。
             TomatoBiquga.ConsoleSetup.UseUtf8();
+
+            // ★★ 让"崩溃"变成"可读的失败"，而不是一个系统错误弹窗。
+            //
+            //   用户实测遇到过：跑 `_offlinetests.exe` 弹出
+            //     「_offlinetests.exe - 系统错误：无法创建新的堆栈防护页面」
+            //   这种是 **Windows 的进程级失败**（栈/地址空间耗尽之类），
+            //   不是托管异常 —— 下面那个 try/catch **抓不住**，
+            //   进程直接死、只留一个弹窗，连"崩在第几条断言"都不知道。
+            //
+            //   三件事让它变得可诊断：
+            //     ① 挂 AppDomain.UnhandledException（**别的线程**上未处理的托管异常
+            //        以前会变成"应用程序错误"弹窗，现在至少打印出来）；
+            //     ② 挂 Application.ThreadException（WinForms 消息循环里的异常，
+            //        某些测试会 new 窗体并 DoEvents）；
+            //     ③ 每 N 条断言打一行心跳 —— 真崩了，最后一行心跳就是"崩在哪一段"。
+            _crashNote = null;
+            try
+            {
+                AppDomain.CurrentDomain.UnhandledException += delegate (object s, UnhandledExceptionEventArgs e)
+                {
+                    try
+                    {
+                        string msg = e.ExceptionObject == null ? "(null)" : e.ExceptionObject.ToString();
+                        _crashNote = "未处理异常（可能是别的线程）：" + msg;
+                        Console.WriteLine("[CRASH] " + _crashNote);
+                    }
+                    catch { }
+                };
+                System.Windows.Forms.Application.ThreadException += delegate (object s, System.Threading.ThreadExceptionEventArgs e)
+                {
+                    try
+                    {
+                        _crashNote = "界面线程异常：" + (e.Exception == null ? "(null)" : e.Exception.ToString());
+                        Console.WriteLine("[CRASH] " + _crashNote);
+                    }
+                    catch { }
+                };
+            }
+            catch { }
+
+            // ★ 测试套件里构造 MainForm 时**默认不弹窗、不联网**。
+            //   以前要等构造完再 `f.SuppressDialogs = true`，而 MainForm 构造函数末尾
+            //   已经在 `BeginInvoke(ProbeSitesAsync)` 了 —— 于是"离线测试"实际会
+            //   真的去探活所有站点（慢、吃内存、还不是离线的）。
+            //   这个静态标志在**构造之前**生效（见 MainForm 构造函数第一行）。
+            try { TomatoBiquga.MainForm.SuppressByDefault = true; } catch { }
+            try { TomatoBiquga.LocalBackup.Disabled = true; } catch { }
 
             _pass = 0;
             _fail = 0;
@@ -2679,6 +2745,101 @@ namespace TomatoBiquga
 
             // ---------- 章节号归一化（缺号摘要 / 顺序体检的基础）----------
             TestChapterNumber();
+
+            // ---------- 启动自动备份（防"U 盘一拔，书架没了"）----------
+            TestLocalBackup();
+        }
+
+        /// <summary>
+        /// 启动自动备份：把**丢了就找不回来**的文件（书架/站点配置/settings）复制到固定盘。
+        ///
+        /// ★ 真实事故：程序放在可拔插 U 盘上，那个盘在开发过程中掉过两次线
+        ///   （一次正好在升级中间，目录整个"不存在"）。下载被拔 → 文件写坏；
+        ///   U 盘丢了 → 书架和几十本书的记录一起没了。
+        ///
+        /// 这个测试盯四件事：
+        ///   ① 只备份该备份的、能复制成功；
+        ///   ② 频率控制（30 分钟内不重复做，避免频繁重启刷爆磁盘）；
+        ///   ③ 只保留最近 5 份；
+        ///   ④ **备份目录在程序目录里时必须拒绝**（否则"程序目录整个没了"时备份也跟着没）。
+        /// </summary>
+        private static void TestLocalBackup()
+        {
+            // ① 频率控制（纯函数）
+            var now = new DateTime(2026, 10, 19, 20, 0, 0);
+            Check("备份：从没备份过就要备份", LocalBackup.ShouldSnapshot(now, null, 30));
+            Check("备份：刚备份过不重复",
+                !LocalBackup.ShouldSnapshot(now, now.AddMinutes(-5), 30));
+            Check("备份：过了间隔就再来一次",
+                LocalBackup.ShouldSnapshot(now, now.AddMinutes(-31), 30));
+            Check("备份：间隔设 0 时总是备份",
+                LocalBackup.ShouldSnapshot(now, now.AddMinutes(-1), 0));
+
+            // ② 目录包含判断（防"备份写进程序目录"）
+            Check("备份：同目录算在里面", LocalBackup.IsInside(@"C:\a\b", @"C:\a\b"));
+            Check("备份：子目录算在里面", LocalBackup.IsInside(@"C:\a\b\c", @"C:\a\b"));
+            Check("备份：兄弟目录不算", !LocalBackup.IsInside(@"C:\a\bb", @"C:\a\b"));
+            Check("备份：大小写不敏感", LocalBackup.IsInside(@"C:\A\B", @"c:\a\b"));
+
+            // ③ 目录名 ↔ 时间戳
+            DateTime t;
+            Check("备份：能解析快照目录名",
+                LocalBackup.TryParseStamp("2026-10-19_201530", out t) && t.Year == 2026 && t.Minute == 15);
+            Check("备份：乱名字不认", !LocalBackup.TryParseStamp("backup", out t));
+
+            // ④ 真跑一次：造一个"程序目录"，里面有书架
+            string tmpRoot = Path.Combine(Path.GetTempPath(), "nd_bk_" + Guid.NewGuid().ToString("N"));
+            string appDir = Path.Combine(tmpRoot, "app");
+            string bkRoot = Path.Combine(tmpRoot, "backup");
+            // 测试套件默认把备份关掉了（不想往用户的「我的文档」写东西，也少开线程）；
+            // 这一段要验**真行为**，所以临时打开，结束时还原。
+            bool wasDisabled = LocalBackup.Disabled;
+            try
+            {
+                LocalBackup.Disabled = false;
+                Directory.CreateDirectory(appDir);
+                File.WriteAllText(Path.Combine(appDir, "书架.json"), "{\"books\":[]}", new UTF8Encoding(false));
+                File.WriteAllText(Path.Combine(appDir, "站点配置.ini"), "[xbiquwk]\nworkers=12\n", new UTF8Encoding(false));
+                // 这个不该被备份（能重建）
+                File.WriteAllText(Path.Combine(appDir, "搜索索引.json"), "{}", new UTF8Encoding(false));
+
+                string snap = LocalBackup.Run(appDir, bkRoot, null);
+                Check("备份：第一次能生成快照", !string.IsNullOrEmpty(snap) && Directory.Exists(snap));
+                if (!string.IsNullOrEmpty(snap))
+                {
+                    Check("备份：书架被复制", File.Exists(Path.Combine(snap, "书架.json")));
+                    Check("备份：站点配置被复制", File.Exists(Path.Combine(snap, "站点配置.ini")));
+                    Check("备份：搜索索引不备份（能重建）",
+                        !File.Exists(Path.Combine(snap, "搜索索引.json")));
+                    Eq("备份：内容一字不差", "{\"books\":[]}",
+                        File.ReadAllText(Path.Combine(snap, "书架.json"), Encoding.UTF8));
+                }
+
+                // 同一个位置再跑：间隔没到 → 不生成第二份
+                string snap2 = LocalBackup.Run(appDir, bkRoot, null);
+                Check("备份：30 分钟内不重复做", snap2 == null);
+
+                // ⑤ 保留 N 份：造 7 个旧快照 + 现有 1 个
+                for (int i = 1; i <= 7; i++)
+                    Directory.CreateDirectory(Path.Combine(bkRoot,
+                        new DateTime(2026, 1, 1, 0, 0, 0).AddHours(i).ToString("yyyy-MM-dd_HHmmss")));
+                int before = Directory.GetDirectories(bkRoot).Length;
+                LocalBackup.PruneOld(bkRoot, LocalBackup.KeepSnapshots);
+                int after = Directory.GetDirectories(bkRoot).Length;
+                Check("备份：只保留最近 N 份（实测 " + before + " → " + after + "）",
+                    after == LocalBackup.KeepSnapshots);
+
+                // ⑥ 备份目录在程序目录里面 → 直接拒绝（否则跟着一起没）
+                string inside = Path.Combine(appDir, "backup");
+                Directory.CreateDirectory(inside);
+                Check("备份：备份目录在程序目录里时拒绝",
+                    LocalBackup.Run(appDir, inside, null) == null);
+            }
+            finally
+            {
+                try { if (Directory.Exists(tmpRoot)) Directory.Delete(tmpRoot, true); } catch { }
+                LocalBackup.Disabled = wasDisabled;   // 还原：别影响后面的测试
+            }
         }
 
         /// <summary>

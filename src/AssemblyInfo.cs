@@ -23,6 +23,40 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
+// 1.7.1：启动自动备份 + 把"崩溃"变成"可诊断的失败"。
+//        · 起因：用户跑 `_offlinetests.exe` 弹出
+//          「_offlinetests.exe - 系统错误：无法创建新的堆栈防护页面」。
+//          这是 Windows 的**进程级失败**（栈/地址空间 exhaustion），不是托管异常，
+//          try/catch 抓不住，进程直接死、只留一个弹窗，连"崩在第几条断言"都不知道。
+//        · 我复现不出来（连跑 5 次全过、1572/1572）。所以这版**不是"修好了"，
+//          而是"下次崩了能立刻定位"** —— 这点必须说清楚，不能假装修好了。
+//        · 但顺着这条线查出一个**真 bug**：
+//          离线测试会**真的联网探活所有站点**。原因：MainForm 构造函数末尾
+//          已经 `BeginInvoke(ProbeSitesAsync)`，而测试是**构造完**才
+//          `f.SuppressDialogs = true` —— 于是"离线测试"从来不离线：
+//            34 秒 → 26 秒（去掉探活后实测）
+//          修法：新增 `MainForm.SuppressByDefault` 静态开关，测试套件在 new 之前置位，
+//          构造函数**第一行**读它。附带把 `LocalBackup.Disabled` 也置上，
+//          免得跑一次测试就往用户的「我的文档」里塞一份快照。
+//        · 新增三样可诊断能力：
+//          ① AppDomain.UnhandledException + Application.ThreadException 兜底打印
+//             （以前别的线程抛托管异常 → "应用程序错误"弹窗，什么都不留）；
+//          ② 每 100 条断言一行心跳 `[心跳] 已跑 N 条断言`（真崩了，最后一行就是位置）；
+//          ③ 崩溃记录 `_crashNote`。
+//        · 新增功能：**启动自动备份**（LocalBackup.cs）。
+//          真实事故：程序放在可拔插 U 盘上，那个盘在开发中掉过两次线
+//          （一次正好在升级中间，目录整个"不存在"）。
+//          下载被拔 → 文件写坏；U 盘丢了 → 书架和几十本书的记录一起没了。
+//          做法：把 `书架.json` / `站点配置.ini` / `settings.ini` 复制到
+//          「我的文档\novel-downloader-备份\yyyy-MM-dd_HHmmss\」，保留最近 5 份，
+//          30 分钟内不重复做，**任何失败只记日志、绝不影响启动**。
+//          只备份"丢了就找不回来"的：`搜索索引.json` 和 `cache\` 能重建，不备份。
+//        · 实测：启动程序 → 生成 `2026-10-19_192020\站点配置.ini`（当时还没有书架）。
+//        · CI：上一次我建议"加 CI"，其实 **CI 早就有了**（275 行，含 tag 自动发版、
+//          每周联网冒烟）。真实缺口是**两套编译清单**：
+//          build.bat 是显式列表，csproj 是 `..\src\Common\*.cs` 通配符。
+//          这版用 `dotnet build build/NovelDownloader.csproj -c Release` 在本地
+//          验证了 CI 那条路径（exit 0），并把漏掉的 `_textfit` 加进 CI。
 // 1.7.0：从 bookCapture 借鉴清单里取了三样能落地的（其余评估后不做，见更新说明）。
 //        · 起因：桌面上的《novel-downloader-可借鉴实现清单.md》是一份逆向 bookCapture
 //          后的施工单（P0/P1/P2 共 11 项）。它开头自己就要求"先核对仓库现状"——
@@ -417,6 +451,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.7.0.0")]
-[assembly: AssemblyFileVersion("1.7.0.0")]
-[assembly: AssemblyInformationalVersion("1.7.0")]
+[assembly: AssemblyVersion("1.7.1.0")]
+[assembly: AssemblyFileVersion("1.7.1.0")]
+[assembly: AssemblyInformationalVersion("1.7.1")]

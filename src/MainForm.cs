@@ -129,6 +129,10 @@ namespace TomatoBiquga
 
         public MainForm()
         {
+            // ★ 第一行就定下"要不要弹窗/联网" —— 因为构造函数末尾会 BeginInvoke 探活。
+            //   测试套件会在 new 之前把 SuppressByDefault 置 true（见 OfflineTests.Run）。
+            SuppressDialogs = SuppressByDefault;
+
             // 标题避开第三方商标：产品名用 ASCII 的 novel-downloader（= 仓库名），中文名只作说明。
             // ★ 版本号从程序集读，不写死在字符串里 —— 之前这里硬编码 "v1.0.5"，
             //   发到 1.2.0 之后标题还显示 1.0.5（用户看截图会以为装的是旧版）。
@@ -621,6 +625,19 @@ namespace TomatoBiquga
             }
             if (!string.IsNullOrEmpty(SiteProfileStore.LastError)) Log("站点配置提醒：" + SiteProfileStore.LastError);
             Log("站点参数：" + (_profile != null ? _profile.ToString() : "（默认）"));
+            // ★ 启动时备份"丢了就找不回来"的文件（书架 / 站点配置 / settings）。
+            //   真实事故：程序放在可拔插 U 盘上，那个盘在开发过程中掉过两次线 ——
+            //   一次正好在升级中间，目录整个"不存在"。
+            //   下载被拔 → 文件写坏；U 盘丢了 → 书架和几十本书的记录一起没了。
+            //   备份在后台线程做，失败只记日志，绝不影响启动。
+            if (!SuppressDialogs)
+            {
+                try
+                {
+                    LocalBackup.RunAsync(AppDomain.CurrentDomain.BaseDirectory, Log);
+                }
+                catch { }
+            }
             Log("· 笔趣阁：直接输入中文书名搜索（例如：沧元图），双击结果载入目录后勾选章节下载。");
             Log("· 番茄小说：番茄没有公开的中文搜索接口，请点「浏览器搜索」去官网找到书，");
             Log("  再把书籍链接（.../page/数字）或 book_id 粘贴到输入框即可自动载入目录。");
@@ -2632,6 +2649,18 @@ namespace TomatoBiquga
 
         /// <summary>自动化测试时置 true，避免弹窗卡住测试</summary>
         internal bool SuppressDialogs { get; set; }
+
+        /// <summary>
+        /// "构造出来就默认不弹窗、不联网"。
+        ///
+        /// ★ 为什么需要：离线测试要 `new MainForm()` 来量布局/结果栏，而
+        ///   `SuppressDialogs` 是**构造完**才赋值的 —— 但构造函数末尾已经在
+        ///   `BeginInvoke(ProbeSitesAsync)`：
+        ///     ① 于是"离线测试"实际会真的去探活所有站点（慢、吃内存、不离线）；
+        ///     ② 探活失败还可能弹窗，测试就挂在那儿。
+        ///   这个静态标志在**构造之前**由测试套件置位，构造函数第一行读它。
+        /// </summary>
+        internal static bool SuppressByDefault;
 
         // ------------------------------------------------------------ 增量更新 / EPUB 导出
 
