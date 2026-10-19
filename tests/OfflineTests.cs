@@ -2812,6 +2812,106 @@ namespace TomatoBiquga
 
             // ---------- 诊断包：隐私必须打码，内容必须有用 ----------
             TestDiagnosticsExporter();
+
+            // ---------- 新源（排名中文网）+ 为它加的两个引擎能力 ----------
+            TestPmzwAndNewEngineFeatures();
+        }
+
+        /// <summary>
+        /// 排名中文网（pmzw）+ 为它加的两个引擎能力：
+        ///   ① 多段 base64 正文（ContentBase64Pattern）；
+        ///   ② 目录分页 + 按章号去重排序（TocPageUrlTemplate / TocSortByNumber）。
+        ///
+        /// ★ 为什么这些要钉死：
+        ///   · 目录分页只读第一页**不会报错**，用户会以为这本书只有 100 章；
+        ///   · 重复上传的同一章不去重会下 4 遍；
+        ///   · 而同号重复里**最早那份是残缺的**（实测 734 字符 vs 854 字符），
+        ///     所以"保留第一份"是错的，必须保留 id 最大（最新上传）的那份；
+        ///   · base64 分段拼接**顺序错了正文就是乱的**，而且乱得很自然，抽查发现不了。
+        /// </summary>
+        private static void TestPmzwAndNewEngineFeatures()
+        {
+            // ① 新源已注册、规则能通过校验
+            var d = SiteRegistry.ByKey("pmzw");
+            Check("新源：排名中文网已注册", d != null);
+            var rule = SiteRules.ByKey("pmzw");
+            Check("新源：规则存在", rule != null);
+            if (rule != null)
+            {
+                Check("新源：显示名", rule.DisplayName == "排名中文网");
+                Check("新源：支持搜索", (rule.Caps & SiteCapabilities.Search) != 0);
+                Check("新源：支持贴地址", (rule.Caps & SiteCapabilities.AddressIntake) != 0);
+                Check("新源：目录分页模板含 %p",
+                    !string.IsNullOrEmpty(rule.TocPageUrlTemplate)
+                    && rule.TocPageUrlTemplate.IndexOf("%p", StringComparison.Ordinal) >= 0);
+                Check("新源：目录页码上限合理", rule.TocMaxPages >= 10 && rule.TocMaxPages <= 100);
+                Check("新源：开了按章号去重排序", rule.TocSortByNumber);
+                Check("新源：正文用多段 base64", !string.IsNullOrEmpty(rule.ContentBase64Pattern));
+                Check("新源：搜索必须带 Referer（不带站点当没输入）",
+                    !string.IsNullOrEmpty(rule.SearchReferer));
+                // 校验器必须能编译所有正则（写错一个字符这里就炸）
+                try { rule.Validate(); Check("新源：规则校验通过", true); }
+                catch (Exception ex) { Check("新源：规则校验通过（失败：" + ex.Message + "）", false); }
+            }
+
+            // ② 多段 base64：按顺序解码拼接
+            if (rule != null)
+            {
+                var site = new RuleSite(rule);
+                // 两段 base64，分别是 "<br />第一段" 和 "<br />第二段"
+                string p1 = Convert.ToBase64String(Encoding.UTF8.GetBytes("<br />第一段"));
+                string p2 = Convert.ToBase64String(Encoding.UTF8.GetBytes("<br />第二段"));
+                string html = "<div id=\"content\">"
+                    + "document.writeln(qsbs.bb('" + p1 + "'));"
+                    + "document.writeln(qsbs.bb('" + p2 + "'));"
+                    + "</div>";
+                string text = site.ChapterTextFromHtml(html);
+                Check("新源：多段 base64 能解出正文", !string.IsNullOrEmpty(text));
+                if (!string.IsNullOrEmpty(text))
+                {
+                    Check("新源：两段都在", text.IndexOf("第一段", StringComparison.Ordinal) >= 0
+                        && text.IndexOf("第二段", StringComparison.Ordinal) >= 0);
+                    Check("新源：顺序没乱（第一段在第二段之前）",
+                        text.IndexOf("第一段", StringComparison.Ordinal) < text.IndexOf("第二段", StringComparison.Ordinal));
+                    Check("新源：没有残留 JS 代码",
+                        text.IndexOf("document.writeln", StringComparison.Ordinal) < 0
+                        && text.IndexOf("qsbs", StringComparison.Ordinal) < 0);
+                }
+                // 空页要说 null，不能返回空串污染下游
+                Check("新源：没有 base64 段时返回 null", site.ChapterTextFromHtml("<div id=\"content\">x</div>") == null);
+            }
+
+            // ③ 按章号去重 + 排序 + 保留最新上传
+            if (rule != null)
+            {
+                var site = new RuleSite(rule);
+                var list = new List<ChapterInfo>
+                {
+                    new ChapterInfo { Id = "347190", Title = "第1204章 圣棘冠" },   // 最早→残缺
+                    new ChapterInfo { Id = "353239", Title = "第1204章 圣棘冠" },   // 最新→完整
+                    new ChapterInfo { Id = "900001", Title = "第1837章 大结局" },
+                    new ChapterInfo { Id = "900002", Title = "第1章 我有三个相宫" },
+                    new ChapterInfo { Id = "900003", Title = "楔子" },
+                    new ChapterInfo { Id = "900004", Title = "番外 那个夏天" },
+                    new ChapterInfo { Id = "900005", Title = "第2章 第二章" },
+                };
+                site.DedupeAndSortByNumber(list);
+                Eq("去重：同号只留一条（7 → 6）", 6, list.Count);
+                Eq("去重：保留的是**最新上传**那份", "353239", list[2].Id);
+                Eq("去重：按章号升序 0", "第1章 我有三个相宫", list[0].Title);
+                Eq("去重：按章号升序 1", "第2章 第二章", list[1].Title);
+                Eq("去重：按章号升序 2", "第1204章 圣棘冠", list[2].Title);
+                Eq("去重：按章号升序 3", "第1837章 大结局", list[3].Title);
+                Eq("去重：无章号的排在最后（楔子）", "楔子", list[4].Title);
+                Eq("去重：无章号的排在最后（番外）", "番外 那个夏天", list[5].Title);
+                Eq("去重：Order 重新编号", 0, list[0].Order);
+                Eq("去重：Order 末项", 5, list[5].Order);
+
+                // 只有一条时不该动
+                var one = new List<ChapterInfo> { new ChapterInfo { Id = "1", Title = "第1章" } };
+                site.DedupeAndSortByNumber(one);
+                Eq("去重：单条不动", 1, one.Count);
+            }
         }
 
         /// <summary>

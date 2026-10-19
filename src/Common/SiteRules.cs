@@ -62,6 +62,7 @@ namespace TomatoBiquga
             var list = new List<SiteRule>();
             list.Add(Xbiquwk());
             list.Add(Biquge365());
+            list.Add(Pmzw());
             _all = list;
             return _all;
         }
@@ -219,6 +220,92 @@ namespace TomatoBiquga
                 ChapterPagesAddressableByKey = true,
 
                 KnownTitles = new[] { "沧元图" },
+            };
+        }
+
+        /// <summary>
+        /// 排名中文网（pmzw.net）—— 2026-10-19 实测通过。
+        ///
+        /// 为什么加它：现有 5 个站点里只有「笔尖中文」稳定，
+        /// 笔趣阁365 时好时坏（同一次搜索 6 条或 0 条），
+        /// 笔趣阁 PC 单请求 4.7~13 秒还间歇 502，番茄没有搜索接口。
+        /// 换句话说：**能用的源只有一个**，这是这个项目最大的短板。
+        ///
+        /// 实测：搜索 POST /search.html（表单字段 s）；书页 /shu/796/ 有
+        /// og:novel 元数据 + 1837 章（大结局）；目录 index_1..index_19；
+        /// 正文 31 段 base64，解码正常。
+        ///
+        /// ★ 两个新能力是为它加的（见 SiteRule 里的注释）：
+        ///   · ContentBase64Pattern：正文散在 document.writeln(qsbs.bb('…')) 里，
+        ///     一章 30+ 段，必须按顺序解码拼接（顺序错了正文就是乱的）；
+        ///   · TocPageUrlTemplate / TocMaxPages：目录切成 index_N.html，一页 100 章，
+        ///     只读第一页**不会报错**，用户会以为这本书只有 100 章。
+        /// </summary>
+        private static SiteRule Pmzw()
+        {
+            return new SiteRule
+            {
+                Key = "pmzw",
+                DisplayName = "排名中文网",
+                Base = "https://www.pmzw.net/",
+                Caps = SiteCapabilities.Search | SiteCapabilities.AddressIntake
+                     | SiteCapabilities.TocInDetailPage,
+
+                // 实测：<form id="novel_search" method="post" action="/search.html">
+                //         <input name="s" placeholder="输入书名/作者进行搜索，宁少字勿错字">
+                SearchUrl = "https://www.pmzw.net/search.html",
+                SearchIsPost = true,
+                SearchForm = new[]
+                {
+                    new[] { "s", "%s" },
+                },
+                SearchReferer = "https://www.pmzw.net/",
+                // 结果页有表头「文章名称 / 最新章节 / 作者 / 更新」——
+                // 用它区分"确实是结果页"和"错误页被当成没搜到"。
+                SearchIsResultPattern = "文章名称",
+                // 沿用笔尖中文的教训：**不开**关键词校验
+                // （有些站不回显关键词，一校验就把整页结果误杀成"无结果"）。
+                SearchResultMustContainKeyword = false,
+                // 结果行四列：0 书名 | 1 最新章节 | 2 作者 | 3 更新
+                SearchAuthorColumn = 2,
+                SearchDescColumns = new[] { 1, 3 },
+                BookLinkPatterns = new[]
+                {
+                    "<td class=\"odd\"[^>]*>\\s*<a href=\"(/shu/\\d+/)\"",
+                    "<a href=\"(/shu/\\d+/)\"",
+                    "<a href=\"(/books/\\d+/)\"",
+                },
+
+                BookTitlePattern = "og:novel:book_name\"\\s+content=\"([^\"]*)\"",
+                // ★ 这个站的 og 标签写坏了：content 没有闭合引号
+                //   （`content="天蚕土豆/><meta property=`），所以不能用 `[^"]*`，
+                //   否则会把后面半段 HTML 吃进作者名。停在 `<` 更稳。
+                BookAuthorPattern = "og:novel:author\"\\s+content=\"([^\"<]*)",
+                BookIntroPattern = "og:description\"\\s+content=\"([^\"]*)\"",
+                BookCoverPattern = "og:image\"\\s+content=\"([^\"]*)\"",
+
+                // 目录分页：/shu/796/index_1.html … index_19.html
+                // ★ 目录首页必须是**书籍页**（/shu/796/）：它的 dl.zjlist 里有第 1~99 章，
+                //   而 index_N 是从第 100 章才开始的 —— 用 index_1 当首页会**丢掉前 99 章**。
+                TocUrlTemplate = "https://www.pmzw.net/shu/%i/",
+                TocLinkPattern = "<a href=\"(/shu/\\d+/\\d+\\.html)\"[^>]*>([^<]{0,120})</a>",
+                TocLinksAreAbsolute = false,
+                TocIsDescending = false,
+                TocPageUrlTemplate = "https://www.pmzw.net/shu/%i/index_%p.html",
+                TocMaxPages = 40,
+                // 这个站同一本书被**重复上传过**（实测 3008 个 id 只对应 1830 个章号，
+                // 第1204章 有 4 个不同 URL）。不去重会把同一章下 4 遍，
+                // 而"下载成功、章数更多"看起来完全正常 —— 用户几乎不可能发现。
+                TocSortByNumber = true,
+
+                // 正文：<div id="content"> 里一堆 document.writeln(qsbs.bb('…'));
+                ContentPattern = "<div[^>]*id=\"content\"[^>]*>([\\s\\S]*?)</div>",
+                ContentBase64Pattern = "qsbs\\.bb\\('([^']+)'\\)",
+                ContentIsBase64 = false,
+                // 站点水印：正文开头「【】c0，更新快，无弹窗！」之类
+                ContentStripPattern = "【[^】]{0,20}】[^\\n]{0,30}更新快[^\\n]*|[ \\t]*一秒记住[^\\n]*",
+
+                KnownTitles = new[] { "万相之王" },
             };
         }
     }

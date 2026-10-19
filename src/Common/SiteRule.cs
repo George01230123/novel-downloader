@@ -163,6 +163,53 @@ namespace TomatoBiquga
         /// <summary>正文页里"下一页"链接的正则（章内分页），可空</summary>
         public string ContentNextPagePattern;
 
+        /// <summary>
+        /// **多段 base64** 正文：捕获组 1 = 一段 base64，全页所有匹配**按出现顺序**解码后拼接。
+        ///
+        /// 为什么需要（排名中文网 pmzw 就是这种）：正文不是直接写在 HTML 里，而是
+        ///   <code>document.writeln(qsbs.bb('PGJyIC8+...'));</code>
+        /// 每 1~2 段正文包一个 base64 片段，一章能有 30+ 段。
+        /// <see cref="ContentIsBase64"/> 只处理"整块就是一个 base64"的情况，
+        /// 处理不了这种"JS 里散着装很多段"的形态。
+        ///
+        /// 设置了这个字段时，<see cref="ContentPattern"/> 仍然必填（用于框定范围），
+        /// 但真正取正文走这里。
+        /// </summary>
+        public string ContentBase64Pattern;
+
+        // ---------------- 目录分页 ----------------
+
+        /// <summary>
+        /// 目录分页地址模板，<c>%i</c> = 书号（路径里第一段数字），<c>%p</c> = 页码（从 1 开始）。
+        ///
+        /// 为什么需要：不少站点的目录被切成 `index_1.html` / `index_2.html` … 每页 100 章。
+        /// 排名中文网一本书 1837 章 = 19 页；只读第一页就只能拿到 100 章，
+        /// 而"只拿到一部分目录"**不会报错**，用户会以为这本书只有 100 章。
+        ///
+        /// 为空 = 不分页（绝大多数站点）。
+        /// </summary>
+        public string TocPageUrlTemplate;
+
+        /// <summary>目录最多翻多少页（防"翻页永不终止"）。1 = 不分页</summary>
+        public int TocMaxPages = 1;
+
+        /// <summary>
+        /// 目录**按章号去重并升序排序**。
+        ///
+        /// 为什么需要（排名中文网实测）：同一个站上同一本书被**重复上传过**，
+        /// 第1204章 有 4 个不同的 URL（3008 个 id 只对应 1830 个章号）。
+        /// 不去重就会把同一章下 4 遍，输出文件里同一章重复 4 次 ——
+        /// 而"下载成功、章数更多"看起来完全正常，用户几乎不可能发现。
+        ///
+        /// 行为：
+        ///   · 按 <see cref="ChapterNumber"/> 解析标题里的章号，**同号只保留最先出现的那一条**；
+        ///   · 然后把带章号的按升序稳定排序；
+        ///   · 解析不出章号的（楔子/番外/序）保持原相对顺序，**排在最后**，绝不参与排序。
+        ///
+        /// 默认 false（绝大多数站点目录本身是对的，不该动）。
+        /// </summary>
+        public bool TocSortByNumber;
+
         // ---------------- 基准测试 ----------------
 
         /// <summary>
@@ -217,6 +264,12 @@ namespace TomatoBiquga
             MustCompile(ContentPattern, "ContentPattern");
             MustCompileIfSet(ContentStripPattern, "ContentStripPattern");
             MustCompileIfSet(ContentNextPagePattern, "ContentNextPagePattern");
+            MustCompileIfSet(ContentBase64Pattern, "ContentBase64Pattern");
+            if (TocMaxPages < 1) TocMaxPages = 1;
+            // 目录分页：给了页码模板就必须能编出地址，否则是配置写错
+            if (!string.IsNullOrEmpty(TocPageUrlTemplate)
+                && TocPageUrlTemplate.IndexOf("%p", StringComparison.Ordinal) < 0)
+                throw new ArgumentException(Key + ": TocPageUrlTemplate 必须包含 %p（页码）");
 
             if (SearchIsPost && (SearchForm == null || SearchForm.Length == 0))
                 throw new ArgumentException(Key + ": SearchIsPost=true 但 SearchForm 为空");

@@ -332,6 +332,17 @@ namespace TomatoBiquga
                 throw new Exception("没抓到任何章节：" + why + "  地址=" + tocUrl);
             }
 
+            // ★ 目录分页：不少站点把目录切成 index_1.html / index_2.html … 每页 100 章。
+            //
+            //   只读第一页**不会报错** —— 用户会以为这本书只有 100 章，
+            //   而这是最难发现的一类错误（下载"成功"、文件"完整"、只是少了一半）。
+            //   排名中文网 1837 章 = 19 页，就是这个情况。
+            if (!string.IsNullOrEmpty(_r.TocPageUrlTemplate) && _r.TocMaxPages > 1)
+                FetchMoreTocPages(chapters, item.Url, tocUrl, log);
+
+            // ★ 按章号去重 + 排序（只有规则显式开启时才做）。
+            if (_r.TocSortByNumber) DedupeAndSortByNumber(chapters);
+
             book.Chapters = chapters;
             if (log != null)
                 log("目录完成：共 " + chapters.Count + " 章（" + chapters[0].Title + " → "
@@ -493,6 +504,14 @@ namespace TomatoBiquga
         public string ChapterTextFromHtml(string html)
         {
             if (string.IsNullOrEmpty(html)) return null;
+
+            // ★ 多段 base64（排名中文网那种）：正文散在
+            //   document.writeln(qsbs.bb('…')); 里，一章 30 多段。
+            //   必须在 ContentPattern 之前处理 —— 因为 ContentPattern 只框范围，
+            //   真正取内容要按段解码再按顺序拼接（顺序错了正文就是乱的）。
+            if (!string.IsNullOrEmpty(_r.ContentBase64Pattern))
+                return ChapterTextFromSegments(html);
+
             var m = Regex.Match(html, _r.ContentPattern, RegexOptions.IgnoreCase);
             if (!m.Success || m.Groups.Count < 2) return null;
 
@@ -515,6 +534,208 @@ namespace TomatoBiquga
 
             text = NormalizeText(text);
             return text.Length == 0 ? null : text;
+        }
+
+        /// <summary>
+        /// 从"一段段 base64 散在 JS 里"的正文页抽正文（排名中文网这种）。
+        ///
+        /// 做法：按 <see cref="SiteRule.ContentBase64Pattern"/> 取出**全部**片段，
+        /// 逐段解码后**按出现顺序**拼接。
+        ///
+        /// 为什么强调顺序：每段解码出来是"半句话/一段话"，顺序错了正文就是乱的，
+        /// 而且乱得很自然（字都认识，读起来不对）—— 这种错误极难靠抽查发现。
+        /// </summary>
+        private string ChapterTextFromSegments(string html)
+        {
+            MatchCollection ms;
+            try { ms = Regex.Matches(html, _r.ContentBase64Pattern, RegexOptions.IgnoreCase); }
+            catch { return null; }
+            if (ms.Count == 0) return null;
+
+            var sb = new System.Text.StringBuilder();
+            foreach (Match mm in ms)
+            {
+                if (mm.Groups.Count < 2) continue;
+                string payload = Regex.Replace(mm.Groups[1].Value, "\\s+", "");
+                if (payload.Length == 0) continue;
+                string piece = DecodeBase64Text(payload);
+                if (!string.IsNullOrEmpty(piece)) sb.Append(piece);
+            }
+            if (sb.Length == 0) return null;
+
+            string text = Http.StripTags(sb.ToString());
+            if (!string.IsNullOrEmpty(_r.ContentStripPattern))
+            {
+                try { text = Regex.Replace(text, _r.ContentStripPattern, "", RegexOptions.IgnoreCase); }
+                catch { }
+            }
+            text = NormalizeText(text);
+            return text.Length == 0 ? null : text;
+        }
+
+        /// <summary>
+        /// 按章号去重 + 升序排序（<see cref="SiteRule.TocSortByNumber"/>）。
+        ///
+        /// ★ 为什么必须放在引擎里而不是"下载时再处理"：
+        ///   目录顺序决定了落盘顺序、缺失报告的章号、以及「补齐缺章」的插入位置。
+        ///   等下载完再排，等于前面全白做。
+        ///
+        /// 细节：
+        ///   · **同号只留最先出现的那一条**（排序前移动位置会破坏"最先"的语义，
+        ///     所以先去重、后排序，两步分开做）；
+        ///   · 解析不出章号的（楔子/番外/序）保持原相对顺序，统一排到**最后**；
+        ///   · 用稳定排序（OrderBy 在 LINQ 里是稳定的），同号不会乱。
+        /// </summary>
+        internal void DedupeAndSortByNumber(List<ChapterInfo> chapters)
+        {
+            if (chapters == null || chapters.Count < 2) return;
+
+            // ★ 同号重复时保留哪一份：**id 最大（最新上传）的那一份**。
+            //
+            //   这不是猜的。实测（排名中文网 /shu/796/ 第1204章，4 个 URL）：
+            //     id=347190  → 19 段 base64，734 字符，**标题重复贴了两遍、正文被截断**
+            //     id=349152  → 24 段，854 字符  ┐
+            //     id=351048  → 24 段，854 字符  ├ 三份内容完全一致（md5 相同）
+            //     id=353239  → 24 段，854 字符  ┘
+            //   也就是说：最早那份是残缺的，站点后来**重传修好了**。
+            //   而目录里"最先出现"恰好就是那份残缺的 —— 所以"保留第一份"会
+            //   系统性地拿到坏章节（用户看到的是"下载成功但少半章"）。
+            //
+            //   id 不全是数字时退回"保留第一份"（保守，不乱猜）。
+            var best = new Dictionary<int, ChapterInfo>();
+            var tail = new List<ChapterInfo>();
+            var order = new List<int>();          // 保持章的首次出现顺序（排序用）
+            foreach (var c in chapters)
+            {
+                if (c == null) continue;
+                int no;
+                if (!ChapterNumber.TryParse(c.Title, out no)) { tail.Add(c); continue; }
+
+                ChapterInfo exist;
+                if (!best.TryGetValue(no, out exist))
+                {
+                    best[no] = c;
+                    order.Add(no);
+                    continue;
+                }
+                long oldId, newId;
+                if (long.TryParse(exist.Id, out oldId) && long.TryParse(c.Id, out newId) && newId > oldId)
+                    best[no] = c;                  // 更新的是更晚上传的那份
+            }
+
+            var head = new List<ChapterInfo>(order.Count);
+            foreach (int no in order) head.Add(best[no]);
+
+            // 稳定升序
+            head.Sort(delegate (ChapterInfo a, ChapterInfo b)
+            {
+                int na, nb;
+                bool oa = ChapterNumber.TryParse(a.Title, out na);
+                bool ob = ChapterNumber.TryParse(b.Title, out nb);
+                if (oa && ob) return na.CompareTo(nb);
+                if (oa) return -1;
+                if (ob) return 1;
+                return 0;
+            });
+
+            chapters.Clear();
+            foreach (var c in head) chapters.Add(c);
+            foreach (var c in tail) chapters.Add(c);
+
+            // 重新编号（Order 必须是 0..N-1，落盘/缺章定位都依赖它）
+            for (int i = 0; i < chapters.Count; i++) chapters[i].Order = i;
+        }
+
+        /// <summary>
+        /// 补齐目录的后续页（<see cref="SiteRule.TocPageUrlTemplate"/> / <see cref="SiteRule.TocMaxPages"/>）。
+        ///
+        /// 停止条件（任一）：
+        ///   · 到达 TocMaxPages；
+        ///   · 这一页**没有新章节**（去重后 0 条）—— 说明翻到底了；
+        ///   · 连续 2 页取不到内容（站点抖动/限流），避免白等。
+        ///
+        /// 为什么用"没有新章节"而不是"链接为空"：几乎每个目录页顶部都会重复
+        /// 挂一条"最新章节"（排名中文网每页都有"第一千八百三十七章 大结局"），
+        /// 所以链接永远不为空 —— 只能靠"有没有带来新 id"判断。
+        /// </summary>
+        private void FetchMoreTocPages(List<ChapterInfo> chapters, string bookUrl, string firstTocUrl,
+            Action<string> log)
+        {
+            string bookPath = PathOf(bookUrl);
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var c in chapters) if (c != null && !string.IsNullOrEmpty(c.Id)) seen.Add(c.Id);
+
+            // 已见过的章号（只在 TocSortByNumber 时用）
+            var seenNo = new HashSet<int>();
+            if (_r.TocSortByNumber)
+            {
+                foreach (var c in chapters)
+                {
+                    int n;
+                    if (ChapterNumber.TryParse(c.Title, out n)) seenNo.Add(n);
+                }
+            }
+
+            int emptyStreak = 0;
+            int dupStreak = 0;      // 连续多少页没有新章节（判停用）
+            int pages = 0;
+            // 起始页：如果"第 1 页"展开出来跟我们已经读过的第一页是同一个地址，
+            // 就从第 2 页开始（否则会白读一遍同一页，然后被"没有新章节"当场判停）。
+            int startPage = 1;
+            try
+            {
+                string p1 = ExpandTemplate(_r.TocPageUrlTemplate, bookPath).Replace("%p", "1");
+                if (string.Equals(p1, firstTocUrl, StringComparison.OrdinalIgnoreCase)) startPage = 2;
+            }
+            catch { }
+
+            for (int p = startPage; p <= _r.TocMaxPages; p++)
+            {
+                string url;
+                try { url = ExpandTemplate(_r.TocPageUrlTemplate, bookPath).Replace("%p", p.ToString()); }
+                catch { break; }
+                if (string.IsNullOrEmpty(url)) break;
+
+                string pageHtml;
+                try { pageHtml = Http.Get(url, firstTocUrl); }
+                catch
+                {
+                    if (++emptyStreak >= 2) break;
+                    continue;
+                }
+                if (string.IsNullOrEmpty(pageHtml)) { if (++emptyStreak >= 2) break; continue; }
+
+                List<ChapterInfo> more;
+                try { more = ExtractChapters(pageHtml, url); }
+                catch { more = null; }
+                if (more == null || more.Count == 0) { if (++emptyStreak >= 2) break; continue; }
+
+                int added = 0;
+                foreach (var c in more)
+                {
+                    if (c == null || string.IsNullOrEmpty(c.Id)) continue;
+                    if (!seen.Add(c.Id)) continue;
+                    chapters.Add(c);
+                    added++;
+                }
+                pages++;
+                emptyStreak = 0;
+                // ★ 判停规则（实测教训）：
+                //   排名中文网的分页**不是单调的** —— 第 20~26 页连续 7 页全是重复，
+                //   第 27 页又恢复出新章（剩下 240 章藏在这之后）。离线模拟 35 页的结果：
+                //     1~19 页 → 1590 章；20~26 页 → 0；27~30 页 → +241；31~34 页 → 0
+                //   所以任何"连续 N 页没新章就停"的阈值都是拿现状赌未来：
+                //     N=2 直接丢 240 章（1590 vs 1830），N=8 又要多读 4 页。
+                //   现在改成：**重复页只是不加东西、继续翻**，只有
+                //     · 这一页抽不到任何章节链接（到底/404），或
+                //     · 连续 10 页没新东西（兜底，防站点天荒地老地重复）
+                //   才停。
+                if (added == 0) { if (++dupStreak >= 10) break; }
+                else dupStreak = 0;
+            }
+
+            if (pages > 0 && log != null)
+                log("   （目录分页：又读了 " + pages + " 页，共 " + chapters.Count + " 章）");
         }
 
         /// <summary>规范化：统一换行、去掉行首空白、压缩连续空行</summary>

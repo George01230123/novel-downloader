@@ -67,11 +67,15 @@ namespace TomatoBiquga
                 string extra = "";
                 if (!string.IsNullOrEmpty(expectedPattern))
                 {
-                    try { if (Regex.IsMatch(html, expectedPattern, RegexOptions.IgnoreCase)) extra = "（但验证规则还能匹配，可能只是页面上没结果）"; }
+                    try { if (Regex.IsMatch(html, expectedPattern, RegexOptions.IgnoreCase)) extra = "（但结果页表头还能匹配，说明页面结构没坏）"; }
                     catch { }
                 }
+                // ★ 文案必须带上"搜索冷却"这一种。实测（排名中文网）：短时间搜太多次后，
+                //   站点返回**正常的空结果页**（表头在、没有结果行），从 HTML 上跟"改版"分不开。
+                //   只说"改版"会让用户白折腾；所以要如实说二选一，并给出可执行的下一步。
                 return "页面正常返回（" + html.Length + " 字符）却一条链接都没匹配到 —— "
-                     + "**站点很可能改版了，规则需要更新**" + extra;
+                     + "**要么站点改版了（规则要更新），要么是搜太频繁被冷却**"
+                     + extra + "。先等 1~2 分钟再搜一次；若一直空，才是改版。";
             }
 
             return "页面只有 " + html.Length + " 字符，内容太少 —— 可能被拦或站点异常";

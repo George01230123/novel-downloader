@@ -67,6 +67,9 @@ namespace TomatoBiquga
         /// <summary>最近一次收到的 HTTP 状态码（0 = 未知/非 HTTP 后端）</summary>
         public static int LastStatusCode;
 
+        /// <summary>最近一次 curl 实际执行的参数（诊断用；不含 URL 里的敏感查询串不处理）</summary>
+        public static string LastCurlArgs;
+
         private static readonly Random Rnd = new Random();
 
         /// <summary>
@@ -944,6 +947,7 @@ namespace TomatoBiquga
                 //   ProcessStartInfo 是**直接启动 curl.exe**，不经过 cmd.exe，
                 //   `>` 会被当成 curl 的参数 → curl 退出码 3（URL 格式错误），
                 //   所有请求全部失败。这个错犯过一次，被联网实测抓出来（见 docs）。
+                LastCurlArgs = args.ToString();
                 args.Append(" -w \"%{http_code}\"");
                 args.Append(" \"").Append(url).Append('"');
 
