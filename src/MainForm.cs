@@ -410,13 +410,18 @@ namespace TomatoBiquga
                 //   不是编码问题（编码错的话 ASCII 也会坏）。见 UiFont 的注释。
                 Font = UiFont.Mono(8.5F),
             };
+            // ★ 日志框的右键菜单 —— 这里放"出问题时最需要"的三件事。
+            //
+            //   为什么挂在日志框而不是工具栏：工具栏已经很挤（再塞按钮，
+            //   小窗口下会换行、直接顶坏布局体检），而"我要报问题"这个动作
+            //   天然发生在**看着日志的时候** —— 右键正是那个位置。
+            txtLog.ContextMenuStrip = BuildLogMenu();
 
             var logBox = new Panel { Dock = DockStyle.Fill };
             logBox.Controls.Add(txtLog);
             bottom.Controls.Add(logBox);
             bottom.Controls.Add(lblStatus);
-            bottom.Controls.Add(progress);
-            Controls.Add(bottom);
+            bottom.Controls.Add(progress);            Controls.Add(bottom);
 
             // 中间：书籍列表 + 章节列表
             var split = new SplitContainer
@@ -3476,6 +3481,101 @@ namespace TomatoBiquga
         }
 
         /// <summary>「检测站点」按钮：重新探活一次</summary>
+        /// <summary>
+        /// 日志框的右键菜单：出问题时最需要的三件事。
+        ///
+        /// 为什么用右键菜单而不是工具栏按钮：工具栏在小窗口下已经很挤，
+        /// 再塞按钮会换行、顶坏布局体检；而"我要报问题"这个动作天然发生在
+        /// **看着日志的时候**，右键就在手边。
+        /// </summary>
+        private ContextMenuStrip BuildLogMenu()
+        {
+            var menu = new ContextMenuStrip();
+            menu.Items.Add("复制全部日志", null, delegate (object s, EventArgs e)
+            {
+                try { Clipboard.SetText(txtLog.Text); Log("日志已复制到剪贴板。"); }
+                catch (Exception ex) { Log("复制失败：" + ex.Message); }
+            });
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("生成诊断包…（打码后打包，发给作者最快）", null,
+                delegate (object s, EventArgs e) { DoExportDiagnostics(); });
+            menu.Items.Add("站点健康（实测哪个源能用）", null,
+                delegate (object s, EventArgs e) { DoShowSiteHealth(); });
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("打开备份目录", null, delegate (object s, EventArgs e)
+            {
+                try
+                {
+                    string dir = TomatoBiquga.LocalBackup.DefaultRoot;
+                    if (string.IsNullOrEmpty(dir) || !System.IO.Directory.Exists(dir))
+                    {
+                        Log("还没有备份目录（程序启动时会自动备份一次）。");
+                        return;
+                    }
+                    System.Diagnostics.Process.Start("explorer.exe", "\"" + dir + "\"");
+                }
+                catch (Exception ex) { Log("打开备份目录失败：" + ex.Message); }
+            });
+            return menu;
+        }
+
+        /// <summary>
+        /// 「生成诊断包」：环境 + 设置（打码）+ 日志 + 站点评分 → 一个 zip。
+        /// 省掉"请把日志发我 / 你的设置是什么 / 哪个站不行"这三轮来回。
+        /// </summary>
+        private void DoExportDiagnostics()
+        {
+            string path = null;
+            try
+            {
+                using (var dlg = new SaveFileDialog())
+                {
+                    dlg.Title = "保存诊断包";
+                    dlg.Filter = "压缩包 (*.zip)|*.zip";
+                    dlg.FileName = "novel-downloader-诊断-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".zip";
+                    try { dlg.InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Desktop); }
+                    catch { }
+                    if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                    path = dlg.FileName;
+                }
+
+                var extra = new System.Collections.Generic.List<string>();
+                extra.Add("当前站点：" + (cboSite != null && cboSite.SelectedItem != null
+                    ? cboSite.SelectedItem.ToString() : "（未选）"));
+                extra.Add("作品：" + (_currentBook != null ? _currentBook.Title : "（未载入）"));
+                extra.Add("章节数：" + (_currentBook != null && _currentBook.Chapters != null ? _currentBook.Chapters.Count : 0));
+                extra.Add("保存到：" + (txtOutput != null ? txtOutput.Text.Trim() : "?"));
+
+                DiagnosticsExporter.Build(path, AppDomain.CurrentDomain.BaseDirectory,
+                    txtLog != null ? txtLog.Text : "", extra, _siteScores);
+                Log("诊断包已生成：" + path);
+                Log("（Cookie/Token/API Key 已打码；不含书名和正文）");
+            }
+            catch (Exception ex)
+            {
+                Log("生成诊断包失败：" + ex.Message);
+            }
+        }
+
+        /// <summary>「站点健康」：把实测到的各站情况摊开（可现场重新实测）。</summary>
+        private void DoShowSiteHealth()
+        {
+            try
+            {
+                if (_siteScores == null) _siteScores = SiteRater.Load(SiteProfileStore.DefaultPath);
+                using (var dlg = new SiteHealthDialog(_siteScores, Log))
+                {
+                    dlg.ShowDialog(this);
+                    // 窗口里可能刚测完，把结果接回来给"自动选最快"用
+                    _siteScores = SiteRater.Load(SiteProfileStore.DefaultPath) ?? _siteScores;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("打开站点健康失败：" + ex.Message);
+            }
+        }
+
         private void DoProbeSites()
         {
             if (_probing) { Log("站点检测正在进行中…"); return; }

@@ -1801,6 +1801,67 @@ namespace TomatoBiquga
             Check("编译清单：build.bat 列的文件 csproj 也都有"
                   + (missingInCsproj.Count > 0 ? " 缺：" + string.Join("、", missingInCsproj.ToArray()) : ""),
                   missingInCsproj.Count == 0);
+
+            // ---- 反向兜底：src 下的**每个** .cs 都必须在两边都算进去 ----
+            //
+            // ★ 为什么补这一条：上面只比了 `src\Common\`。
+            //   而 `src\` **顶层**有 AssemblyInfo/Program/MainForm，csproj 是逐条列出来的
+            //   （不是通配符）。于是"往 src\ 顶层放一个新 .cs"就成一个盲区：
+            //     · 本地 build.bat 只要手工加进 COMMON 就编得过；
+            //     · CI 的 csproj 没有通配符 → **那边根本编不到这个文件**，
+            //       于是 CI 编出来的是残废版（或者直接编译失败）。
+            //   我这版就差点这么干：SiteHealthDialog.cs 一开始放在 src\ 顶层，
+            //   本地全绿、CI 必挂。所以把"任何地方都不许有孤儿源文件"钉死。
+            var allSrcFiles = new List<string>();
+            foreach (var f in Directory.GetFiles(Path.Combine(root, "src"), "*.cs", SearchOption.AllDirectories))
+                allSrcFiles.Add(f.Substring(Path.Combine(root, "src").Length + 1).Replace('/', '\\'));
+
+            // build.bat 能编到的：**全文扫** `src\...\*.cs`。
+            //   为什么不能只看 COMMON/SITES 两个变量：AssemblyInfo.cs / Program.cs /
+            //   MainForm.cs 是直接写在 csc 命令行里的（不在那两个变量里）。
+            //   第一版只解析变量，于是把这"三个孤儿"误报成缺失 ——
+            //   测试自己也会写错，所以这里按"文件里提到过就算"来判，宁可宽松也别误报。
+            var batAll = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string batText = File.ReadAllText(batPath, Encoding.ASCII);
+            foreach (System.Text.RegularExpressions.Match m in
+                System.Text.RegularExpressions.Regex.Matches(batText, @"src\\[A-Za-z0-9_\\.]+\.cs"))
+            {
+                batAll.Add(m.Value.Substring("src\\".Length));
+            }
+
+            // csproj 能编到的：通配符目录 + 显式列出的 src 文件
+            var csAll = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (File.Exists(csprojPath))
+            {
+                foreach (var line in File.ReadAllLines(csprojPath, Encoding.UTF8))
+                {
+                    if (line.IndexOf("Compile", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (line.IndexOf(@"Common\*.cs", StringComparison.OrdinalIgnoreCase) >= 0)
+                        foreach (var f in Directory.GetFiles(Path.Combine(root, "src", "Common"), "*.cs"))
+                            csAll.Add(@"Common\" + Path.GetFileName(f));
+                    if (line.IndexOf(@"Sites\*.cs", StringComparison.OrdinalIgnoreCase) >= 0)
+                        foreach (var f in Directory.GetFiles(Path.Combine(root, "src", "Sites"), "*.cs"))
+                            csAll.Add(@"Sites\" + Path.GetFileName(f));
+                    var m2 = System.Text.RegularExpressions.Regex.Match(line,
+                        @"Include=""\.\.\\src\\([^""]+\.cs)""");
+                    if (m2.Success) csAll.Add(m2.Groups[1].Value.Replace('/', '\\'));
+                }
+            }
+
+            var orphanBat = new List<string>();
+            var orphanCs = new List<string>();
+            foreach (var f in allSrcFiles)
+            {
+                if (!batAll.Contains(f)) orphanBat.Add(f);
+                if (!csAll.Contains(f)) orphanCs.Add(f);
+            }
+            Check("编译清单：src 下没有 build.bat 编不到的孤儿文件"
+                  + (orphanBat.Count > 0 ? " 孤儿：" + string.Join("、", orphanBat.ToArray()) : ""),
+                  orphanBat.Count == 0);
+            Check("编译清单：src 下没有 csproj 编不到的孤儿文件（CI 会编出残废版）"
+                  + (orphanCs.Count > 0 ? " 孤儿：" + string.Join("、", orphanCs.ToArray()) : ""),
+                  orphanCs.Count == 0);
+            Check("编译清单：src 下确实扫到了源文件", allSrcFiles.Count > 20);
         }
 
         /// <summary>
@@ -2748,6 +2809,129 @@ namespace TomatoBiquga
 
             // ---------- 启动自动备份（防"U 盘一拔，书架没了"）----------
             TestLocalBackup();
+
+            // ---------- 诊断包：隐私必须打码，内容必须有用 ----------
+            TestDiagnosticsExporter();
+        }
+
+        /// <summary>
+        /// 「生成诊断包」：环境 + 设置（**打码**）+ 日志 + 站点评分 → 一个 zip。
+        ///
+        /// ★ 这个包是**要发出去**的，所以隐私是硬要求：
+        ///   · Cookie / Token / API Key / 密码 一律打码；
+        ///   · 不含书名（书单是隐私）；
+        ///   · 不含正文和网页缓存。
+        /// 打码写错一次就等于把用户的 Cookie 发到群里 —— 所以这里逐条钉死。
+        /// </summary>
+        private static void TestDiagnosticsExporter()
+        {
+            // ① 键名识别
+            Check("诊断：cookie 打码", DiagnosticsExporter.IsSecretKey("cookie"));
+            Check("诊断：Cookie（大写）打码", DiagnosticsExporter.IsSecretKey("Cookie"));
+            Check("诊断：api_key 打码", DiagnosticsExporter.IsSecretKey("ai_api_key"));
+            Check("诊断：authorization 打码", DiagnosticsExporter.IsSecretKey("Authorization"));
+            Check("诊断：password 打码", DiagnosticsExporter.IsSecretKey("password"));
+            Check("诊断：workers 不打码", !DiagnosticsExporter.IsSecretKey("workers"));
+            Check("诊断：useragent 不打码", !DiagnosticsExporter.IsSecretKey("useragent"));
+            Check("诊断：空键不打码", !DiagnosticsExporter.IsSecretKey(""));
+
+            // ② 逐行打码（= 与 : 两种分隔）
+            Eq("诊断：key=value 打码", "cookie= " + DiagnosticsExporter.Mask,
+                DiagnosticsExporter.SanitizeLine("cookie=abc123"));
+            Eq("诊断：请求头打码", "Cookie: " + DiagnosticsExporter.Mask,
+                DiagnosticsExporter.SanitizeLine("Cookie: abc123"));
+            Eq("诊断：空 cookie 不打码（说明没配，是有用信息）",
+                "cookie=", DiagnosticsExporter.SanitizeLine("cookie="));
+            Eq("诊断：普通行原样", "workers=12", DiagnosticsExporter.SanitizeLine("workers=12"));
+            Eq("诊断：节名+键也要打码", "[xbiquwk] cookie= " + DiagnosticsExporter.Mask,
+                DiagnosticsExporter.SanitizeLine("[xbiquwk] cookie=xyz"));
+            Eq("诊断：空行原样", "", DiagnosticsExporter.SanitizeLine(""));
+
+            // ③ 整段打码：不能有任何一个密钥值漏出去
+            string ini = "[default]\r\nworkers=12\r\ncookie=SESSDATA=leak-me\r\n"
+                       + "token=also-leak\r\nuseragent=Mozilla/5.0\r\n";
+            string clean = DiagnosticsExporter.SanitizeText(ini);
+            Check("诊断：整段里 cookie 值没漏", clean.IndexOf("leak-me", StringComparison.Ordinal) < 0);
+            Check("诊断：整段里 token 值没漏", clean.IndexOf("also-leak", StringComparison.Ordinal) < 0);
+            Check("诊断：整段里普通值还在", clean.IndexOf("workers=12", StringComparison.Ordinal) >= 0);
+            Check("诊断：整段里 UA 还在", clean.IndexOf("Mozilla/5.0", StringComparison.Ordinal) >= 0);
+
+            // ④ 真打一个包，看内容
+            string tmp = Path.Combine(Path.GetTempPath(), "nd_diag_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(tmp);
+                string appDir = Path.Combine(tmp, "app");
+                Directory.CreateDirectory(appDir);
+                File.WriteAllText(Path.Combine(appDir, "settings.ini"),
+                    "[settings]\r\ncookie=SECRET-COOKIE\r\naiapikey=SECRET-KEY\r\nretrypasses=2\r\n",
+                    new UTF8Encoding(false));
+                File.WriteAllText(Path.Combine(appDir, "站点配置.ini"),
+                    "[xbiquwk]\r\nworkers=12\r\n", new UTF8Encoding(false));
+
+                var scores = new System.Collections.Generic.List<SiteScore>();
+                var good = SiteScore.Measured("xbiquwk", "笔尖中文", 100, 200, 80);
+                good.TocCount = 1838;
+                scores.Add(good);
+                var bad = SiteScore.Measured("biquga", "笔趣阁PC", 0, 0, 0);
+                bad.Error = "502";
+                scores.Add(bad);
+
+                string zip = Path.Combine(tmp, "diag.zip");
+                var extra = new System.Collections.Generic.List<string>();
+                extra.Add("当前站点：笔尖中文");
+                extra.Add("cookie=SHOULD-NOT-LEAK");
+                string made = DiagnosticsExporter.Build(zip, appDir, "日志第一行\r\ncookie=LOG-SECRET\r\n", extra, scores);
+                Check("诊断：zip 生成了", File.Exists(made));
+
+                string unzip = Path.Combine(tmp, "un");
+                ZipFile.ExtractToDirectory(made, unzip);
+                string all = "";
+                foreach (string f in Directory.GetFiles(unzip))
+                    all += File.ReadAllText(f, Encoding.UTF8);
+
+                Check("诊断：包里没有 SECRET-COOKIE", all.IndexOf("SECRET-COOKIE", StringComparison.Ordinal) < 0);
+                Check("诊断：包里没有 SECRET-KEY", all.IndexOf("SECRET-KEY", StringComparison.Ordinal) < 0);
+                Check("诊断：包里没有日志里的 cookie", all.IndexOf("LOG-SECRET", StringComparison.Ordinal) < 0);
+                Check("诊断：包里没有补充信息里的 cookie", all.IndexOf("SHOULD-NOT-LEAK", StringComparison.Ordinal) < 0);
+                Check("诊断：普通设置还在", all.IndexOf("retrypasses=2", StringComparison.Ordinal) >= 0);
+                Check("诊断：站点评分写进去了", all.IndexOf("笔尖中文", StringComparison.Ordinal) >= 0);
+                Check("诊断：不可用站点带原因", all.IndexOf("502", StringComparison.Ordinal) >= 0);
+                Check("诊断：有说明文件", File.Exists(Path.Combine(unzip, "怎么读这个包.txt")));
+                Check("诊断：没有正文和缓存",
+                    !Directory.Exists(Path.Combine(unzip, "cache")) && !Directory.Exists(Path.Combine(unzip, "下载")));
+            }
+            finally
+            {
+                try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { }
+            }
+
+            // ⑤ 站点健康面板：空数据要显示提示行，而不是空表
+            try
+            {
+                using (var dlg = new SiteHealthDialog(null, null))
+                {
+                    Eq("健康面板：没数据时有一行提示", 1, dlg.RowCountForTest);
+                    Check("健康面板：提示行说明要实测",
+                        dlg.CellForTest(0, 0) != null && dlg.CellForTest(0, 0).IndexOf("还没有", StringComparison.Ordinal) >= 0);
+                }
+                var list = new System.Collections.Generic.List<SiteScore>();
+                var s1 = SiteScore.Measured("xbiquwk", "笔尖中文", 100, 200, 80);
+                s1.TocCount = 1838;
+                list.Add(s1);
+                using (var dlg2 = new SiteHealthDialog(list, null))
+                {
+                    Eq("健康面板：有数据时一行一站点", 1, dlg2.RowCountForTest);
+                    Eq("健康面板：显示站点名", "笔尖中文", dlg2.CellForTest(0, 0));
+                    Eq("健康面板：显示结论", "可用", dlg2.CellForTest(0, 5));
+                    Check("健康面板：正文耗时带单位",
+                        dlg2.CellForTest(0, 3) != null && dlg2.CellForTest(0, 3).IndexOf("ms", StringComparison.Ordinal) >= 0);
+                }
+            }
+            catch (Exception ex)
+            {
+                Check("健康面板：构造失败 " + ex.GetType().Name + " " + ex.Message, false);
+            }
         }
 
         /// <summary>

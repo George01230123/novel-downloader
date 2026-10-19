@@ -23,6 +23,30 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
+// 1.7.2：把"我要报问题"这条路修通 —— 诊断包 + 站点健康面板。
+//        · 起因：这次开发里我反复说"请把日志发我 / 你的设置是什么 / 哪个站不行"，
+//          每一轮都要用户截图、翻文件、描述现象。这两个功能就是为了消掉那几轮。
+//        · ① **诊断包**（DiagnosticsExporter.cs）：日志框右键 → 生成诊断包…，
+//          打成一个 zip：环境与设置 / 日志 / 站点评分 / settings.ini / 站点配置.ini。
+//          **隐私是硬要求**：Cookie / Token / API Key / 密码 一律打码；
+//          不含书名（书单是隐私）、不含正文、不含网页缓存。
+//          ★ 测试当场抓出一个真漏洞：原来只给配置文件打码，**日志原样进包** ——
+//            而日志里完全可能出现 "Cookie: xxx"（调试输出/用户粘贴/错误回显）。
+//            修掉：日志也走 SanitizeText。这个 bug 要是发出去，等于泄漏 Cookie。
+//        · ② **站点健康面板**（Common/SiteHealthDialog.cs）：日志框右键 → 站点健康。
+//          表格显示每站 搜索/目录/正文 耗时、目录章数、可用性与失败原因；
+//          可点「重新实测（联网）」后台跑 SiteRater.MeasureAll 并刷新。
+//          为什么重要：开下载前根本不知道该用哪个源 ——
+//          笔尖中文 79ms/章 vs 笔趣阁PC 457ms/章，选错就是 5 倍时间。
+//        · 入口放在**日志框右键菜单**而不是工具栏：工具栏小窗下会换行、
+//          直接顶坏布局体检；而"我要报问题"这个动作天然发生在看着日志的时候。
+//        · ★ 差点让 CI 编出残废版：SiteHealthDialog.cs 一开始放在 `src\` 顶层，
+//          而 csproj 只通配 `src\Common\*.cs` / `src\Sites\*.cs`，
+//          顶层那三个文件是**逐条列出**的 —— 于是本地 build.bat 全绿、CI 编不到它。
+//          已移到 src\Common\，并把 TestBuildManifestConsistency 补成
+//          "src 下**每个** .cs 都必须在两边都算进去"，专门堵这个盲区
+//          （第一版补丁还误报了 AssemblyInfo/Program/MainForm —— 它们写在 csc
+//           命令行里、不在 COMMON/SITES 变量里，改成全文扫描才对）。
 // 1.7.1：启动自动备份 + 把"崩溃"变成"可诊断的失败"。
 //        · 起因：用户跑 `_offlinetests.exe` 弹出
 //          「_offlinetests.exe - 系统错误：无法创建新的堆栈防护页面」。
@@ -451,6 +475,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.7.1.0")]
-[assembly: AssemblyFileVersion("1.7.1.0")]
-[assembly: AssemblyInformationalVersion("1.7.1")]
+[assembly: AssemblyVersion("1.7.2.0")]
+[assembly: AssemblyFileVersion("1.7.2.0")]
+[assembly: AssemblyInformationalVersion("1.7.2")]
