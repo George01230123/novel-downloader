@@ -108,6 +108,20 @@ namespace TomatoBiquga
             if (log != null)
                 log(_r.DisplayName + "：搜索「" + keyword + "」得到 " + links.Count + " 条结果");
 
+            // ★ 0 条时**说清原因**，别只丢一句"没搜到"。
+            //   真实原因至少三种，处理方式完全不同：
+            //     站点确实没这本书 / 被限流 / **改版导致规则失效**。
+            //   以前分不清，只能手工 curl 一遍遍试（我为此浪费过很多时间）。
+            if (links.Count == 0 && log != null)
+            {
+                try
+                {
+                    log("   · 诊断：" + SiteDiagnostics.DiagnoseEmptySearch(
+                        html, 0, _r.SearchIsResultPattern));
+                }
+                catch { }
+            }
+
             foreach (var link in links)
             {
                 string abs = Absolutize(link, _r.SearchUrl);
@@ -310,7 +324,13 @@ namespace TomatoBiquga
 
             var chapters = ExtractChapters(html, tocUrl);
             if (chapters.Count == 0)
-                throw new Exception("没抓到任何章节，站点结构可能已变化：" + tocUrl);
+            {
+                // ★ 目录为 0 也要说清原因（限流 / 下架 / 改版），别只丢一句"结构可能变了"。
+                string why;
+                try { why = SiteDiagnostics.DiagnoseEmptyToc(html, 0); }
+                catch { why = "原因不明"; }
+                throw new Exception("没抓到任何章节：" + why + "  地址=" + tocUrl);
+            }
 
             book.Chapters = chapters;
             if (log != null)

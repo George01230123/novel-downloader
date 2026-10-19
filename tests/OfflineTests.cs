@@ -2670,6 +2670,120 @@ namespace TomatoBiquga
 
             // ---------- 录制 / 回放（调规则时不再打站点）----------
             TestRecordReplay();
+
+            // ---------- AutoThrottle：尊重 Retry-After + 带迟滞的恢复 ----------
+            TestAutoThrottle();
+
+            // ---------- 站点诊断：0 条时要说清是"没这本书"还是"改版/被拦" ----------
+            TestSiteDiagnostics();
+        }
+
+        /// <summary>
+        /// AutoThrottle：① 读 `Retry-After`；② 恢复要**带迟滞**。
+        ///
+        /// ★ 原来的两个毛病：
+        ///   ① 完全无视 `Retry-After` —— 站点说"120 秒后再来"，
+        ///      我们 2 秒就砸回去，于是被罚得更狠；
+        ///   ② 一成功就减 1，于是并发数在两个值之间来回抖，
+        ///      而站点看到的是"这个 IP 一直在试探"。
+        /// </summary>
+        private static void TestAutoThrottle()
+        {
+            // ① Retry-After 解析：秒数 / HTTP 日期 / 垃圾
+            Eq("限流：Retry-After 纯秒数", 120, Http.ParseRetryAfter("120"));
+            Eq("限流：Retry-After 带空白", 30, Http.ParseRetryAfter("  30  "));
+            Eq("限流：Retry-After 负数当没有", 0, Http.ParseRetryAfter("-5"));
+            Eq("限流：Retry-After 垃圾值当没有", 0, Http.ParseRetryAfter("soon"));
+            Eq("限流：Retry-After 空串", 0, Http.ParseRetryAfter(""));
+
+            string future = DateTime.UtcNow.AddSeconds(90).ToString("r");
+            int sec = Http.ParseRetryAfter(future);
+            Check("限流：HTTP 日期能换算成秒（约 90）", sec >= 80 && sec <= 100);
+            Eq("限流：已经过期的日期当没有",
+                0, Http.ParseRetryAfter(DateTime.UtcNow.AddSeconds(-60).ToString("r")));
+
+            // ② 从响应头里取（大小写不敏感）
+            string headers = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 45\r\nServer: nginx\r\n";
+            Eq("限流：能从响应头里取出 Retry-After", 45, Http.ExtractRetryAfter(headers));
+            Eq("限流：头里没有就返回 0",
+                0, Http.ExtractRetryAfter("HTTP/1.1 200 OK\r\nServer: nginx\r\n"));
+            Eq("限流：大小写不敏感", 7,
+                Http.ExtractRetryAfter("HTTP/1.1 429\r\nretry-after: 7\r\n"));
+
+            // ③ 迟滞：限流后并发下降；**要连续成功够多次**才恢复一档
+            Http.ResetThrottle();
+            int configured = 12;
+            Eq("限流：初始不降并发", configured, Http.AdaptiveWorkers(configured));
+
+            Http.NoteThrottle(); Http.NoteThrottle();      // 2 次限流 → 降 1
+            Eq("限流：2 次限流降 1 档", configured - 1, Http.AdaptiveWorkers(configured));
+
+            Http.NoteThrottle(); Http.NoteThrottle();      // 共 4 次 → 降 2
+            Eq("限流：4 次限流降 2 档", configured - 2, Http.AdaptiveWorkers(configured));
+
+            // 成功 1 次**不该**立刻恢复（这是迟滞的关键）
+            Http.NoteSuccess();
+            Eq("限流：成功 1 次不立刻恢复（防抖动）",
+                configured - 2, Http.AdaptiveWorkers(configured));
+
+            // 连续成功够 RecoverAfterSuccesses 次才恢复一档
+            for (int i = 1; i < Http.RecoverAfterSuccesses; i++) Http.NoteSuccess();
+            Eq("限流：连续成功够次数才恢复 1 档",
+                configured - 1, Http.AdaptiveWorkers(configured));
+
+            // ④ 再被限流一次 → 连续成功计数清零（不会攒着账一路升回去）
+            Http.NoteThrottle();
+            Http.NoteSuccess();
+            Eq("限流：再次限流后迟滞重新计数",
+                configured - 2, Http.AdaptiveWorkers(configured));
+
+            // ⑤ 不会降到 1 以下
+            for (int i = 0; i < 100; i++) Http.NoteThrottle();
+            Eq("限流：并发最低到 1", 1, Http.AdaptiveWorkers(configured));
+
+            Http.ResetThrottle();
+            Eq("限流：Reset 之后回到原值", configured, Http.AdaptiveWorkers(configured));
+        }
+
+        /// <summary>
+        /// 站点诊断：返回 0 条时，必须能区分「确实没有」/「被拦」/「改版」。
+        ///
+        /// ★ 以前只会说"没搜到这本书"，而三种原因处理方式完全不同。
+        ///   我为此浪费过很多时间：笔趣阁365 搜「万妖圣祖」返回 0 条，
+        ///   到底是限流还是改版？只能手工 curl 一遍遍试。
+        /// </summary>
+        private static void TestSiteDiagnostics()
+        {
+            // ① 站点明确说"没有结果" → 不是规则坏了
+            string noResult = "<html><body>" + new string('x', 3000) + "抱歉，没有找到相关结果</body></html>";
+            string d1 = SiteDiagnostics.DiagnoseEmptySearch(noResult, 0, null);
+            Check("诊断：明确无结果时说是站点没有", d1.IndexOf("没有结果", StringComparison.Ordinal) >= 0);
+
+            // ② 被拦/限流 → 说要等
+            string blocked = "<html><body>" + new string('x', 3000) + "访问过于频繁，请稍后再试</body></html>";
+            string d2 = SiteDiagnostics.DiagnoseEmptySearch(blocked, 0, null);
+            Check("诊断：被拦时提示等一会儿", d2.IndexOf("拦", StringComparison.Ordinal) >= 0
+                || d2.IndexOf("限流", StringComparison.Ordinal) >= 0);
+
+            // ③ 页面正常但抽不到链接 → **改版**
+            string healthy = "<html><body>" + new string('x', 5000) + "</body></html>";
+            string d3 = SiteDiagnostics.DiagnoseEmptySearch(healthy, 0, null);
+            Check("诊断：页面正常却抽不到链接时提示改版",
+                d3.IndexOf("改版", StringComparison.Ordinal) >= 0);
+
+            // ④ 根本没拿到页面
+            Check("诊断：没拿到页面时明确说不是规则问题",
+                SiteDiagnostics.DiagnoseEmptySearch(null, 0, null).IndexOf("没拿到", StringComparison.Ordinal) >= 0);
+
+            // ⑤ 有链接时不该误报
+            Check("诊断：有链接时不报错",
+                SiteDiagnostics.DiagnoseEmptySearch(healthy, 5, null).IndexOf("5 条", StringComparison.Ordinal) >= 0);
+
+            // ⑥ 目录为空也要能诊断
+            Check("诊断：目录页正常却解析不出章节时提示改版",
+                SiteDiagnostics.DiagnoseEmptyToc(healthy, 0).IndexOf("改版", StringComparison.Ordinal) >= 0);
+            Check("诊断：目录页空内容时说可能被拦",
+                SiteDiagnostics.DiagnoseEmptyToc("", 0).IndexOf("空", StringComparison.Ordinal) >= 0);
         }
 
         /// <summary>

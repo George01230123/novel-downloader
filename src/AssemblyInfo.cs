@@ -23,6 +23,35 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
+// 1.6.6：尊重 Retry-After、并发恢复加迟滞、0 条结果说清原因。
+//        · 三处都是"能把静默变可见"的改动：
+//          ① **`Retry-After` 从来不读**（这是真的漏了）：
+//             站点说"120 秒后再来"，我们 2 秒就砸回去（固定指数退避 2s/4s/8s），
+//             于是被罚得更狠、限流升级。现在用 curl 的 `-D` 把响应头也存下来，
+//             解析 `Retry-After`（秒数 / HTTP 日期两种形式），
+//             退避优先听站点的，但**上限仍是 MaxBackoffMs**（真让等一小时就别干等了，
+//             降并发更有效）。
+//          ② 并发恢复**没有迟滞**：原来一成功就减 1，于是并发数在两个值之间来回抖，
+//             站点看到的是"这个 IP 一直在试探"。现在要**连续成功 5 次**才恢复一档，
+//             且并发变化时**记一行日志**（以前是悄悄变，用户只觉得"今天怎么这么卡"）。
+//          ③ 搜索/目录返回 0 条时只丢一句"没搜到"，而真实原因有三种、
+//             处理方式完全不同：站点确实没这本书 / 被限流 / **改版导致规则失效**。
+//             新增 SiteDiagnostics（纯函数）：拿已抓到的 HTML 做便宜判断，
+//             分别报"站点明确没有""像被拦/限流""页面正常却抽不到链接 → 很可能改版"。
+//             这是 Scrapling"自适应选择器"的廉价版 —— 它能在改版后自动重定位，
+//             我们做不到（规则是正则），但至少能立刻说清"规则可能失效了"。
+//        · 实测：
+//          Retry-After 端到端（本地裸 TCP 服务器返回 429 + Retry-After: 7）：
+//            正常页 LastRetryAfterSeconds=0（不误读）
+//            429 页 LastStatusCode=429 / LastRetryAfterSeconds=**7** / ThrottleHits=1 ✓
+//        · 加 25 条断言：Retry-After 两种形式 + 过期 + 垃圾值 + 大小写不敏感；
+//          迟滞（成功 1 次不恢复、连续够次数才恢复 1 档、再限流后重新计数、最低到 1）；
+//          诊断四种情形（明确无结果 / 被拦 / 改版 / 没拿到页面）。
+//        · 过程记录（我自己的工具崩了一次，不是程序 bug）：
+//          验证 Retry-After 的探针用 `HttpListener` 起本地服务，在本机直接抛
+//          `PlatformNotSupportedException: 此平台上不支持操作`，而且我把输出放在最后，
+//          于是表现为"进程无故崩溃、零输出"。改用裸 TcpListener 手写最小 HTTP 响应解决。
+//          教训：① 别用不确定可用的 API 做验证工具；② 探针要**边做边落盘**。
 // 1.6.5：加「录制 / 回放」—— 调站点规则时不再反复打站点。
 //        · 起因（用户问 Scrapling 对项目有没有用）：查了官方文档，它是 Python 框架、
 //          要 Python 3.10+ 和整套浏览器，作为依赖引入和"单文件免安装 236KB"完全冲突 ——
@@ -339,6 +368,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.6.5.0")]
-[assembly: AssemblyFileVersion("1.6.5.0")]
-[assembly: AssemblyInformationalVersion("1.6.5")]
+[assembly: AssemblyVersion("1.6.6.0")]
+[assembly: AssemblyFileVersion("1.6.6.0")]
+[assembly: AssemblyInformationalVersion("1.6.6")]

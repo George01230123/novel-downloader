@@ -765,6 +765,7 @@ namespace TomatoBiquga
             private readonly ManualResetEventSlim[] _ready;
             private int _next;                          // 下一个要提交的下标（只在主线程改）
             private int _inFlight;
+            private int _lastWindow;                    // 上一次的自适应并发（用于"变化时记一行"）
             private bool _stopped;
 
             public FetchPipeline(DownloadRunner owner, int total)
@@ -780,6 +781,24 @@ namespace TomatoBiquga
             private void SubmitAhead()
             {
                 int window = Math.Max(1, Http.AdaptiveWorkers(_owner.Workers));
+                // ★ 并发变化要让用户**看得见**。
+                //   以前自适应是"悄悄发生"的：下载变慢了但日志里没有任何解释，
+                //   用户只会觉得"今天怎么这么卡"。现在每次变化都记一行原因。
+                if (window != _lastWindow)
+                {
+                    if (_lastWindow > 0 && _owner.Log != null)
+                    {
+                        try
+                        {
+                            _owner.Log(string.Format("并发自动调整：{0} → {1}（{2}）", _lastWindow, window,
+                                window < _lastWindow
+                                    ? "检测到站点限流，先降速；站点恢复后会自动升回"
+                                    : "站点恢复正常，逐步提速"));
+                        }
+                        catch { }
+                    }
+                    _lastWindow = window;
+                }
                 while (!_stopped && _next < _total && Volatile.Read(ref _inFlight) < window)
                 {
                     int idx = _next++;

@@ -730,14 +730,81 @@ namespace TomatoBiquga
         /// 指数退避 + 抖动。限流场景退避更狠（起点 2 秒），因为「立刻重试」
         /// 正是站点想惩罚的行为。
         /// 固定 500ms 重试对限流完全无效 —— 这是本轮改动的主要动机。
+        ///
+        /// ★ 站点给了 `Retry-After` 就**听它的**（照 Scrapling 的 AutoThrottle）：
+        ///   以前我们完全无视这个头，一律按 2s/4s/8s 指数退避 ——
+        ///   站点说"120 秒后再来"，我们 2 秒就砸回去，于是被罚到更狠（限流升级）。
+        ///   现在优先用它的秒数，但**上限仍是 MaxBackoffMs**：
+        ///   真遇到"等一小时"就别干等了，让上层把并发降下来更重要。
         /// </summary>
         private static void SleepBackoff(int attempt, bool throttled)
         {
-            long ms = throttled ? 2000L << attempt : 500L << attempt;
-            if (ms > MaxBackoffMs) ms = MaxBackoffMs;
+            long ms;
+            int ra = throttled ? LastRetryAfterSeconds : 0;
+            if (ra > 0)
+            {
+                ms = (long)Math.Min(ra, MaxBackoffMs / 1000) * 1000L;
+                if (ms < 1000) ms = 1000;
+            }
+            else
+            {
+                ms = throttled ? 2000L << attempt : 500L << attempt;
+                if (ms > MaxBackoffMs) ms = MaxBackoffMs;
+            }
             // 抖动：避免多个并发线程退避后同时回来（惊群）
             ms += NextRandom((int)Math.Max(1, ms / 4));
             Thread.Sleep((int)Math.Min(ms, int.MaxValue));
+        }
+
+        /// <summary>
+        /// 解析 `Retry-After`：既可能是秒数（"120"），也可能是 HTTP 日期
+        /// （"Wed, 21 Oct 2015 07:28:00 GMT"，RFC 7231 允许两种）。
+        /// 解析不出就返回 0（= 没有这个头，走默认指数退避）。
+        /// 纯函数，便于离线断言。
+        /// </summary>
+        internal static int ParseRetryAfter(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return 0;
+            string v = value.Trim();
+            if (v.Length == 0) return 0;
+
+            // 形式一：纯秒数（可能有前导 0 / 空白）
+            int sec;
+            if (int.TryParse(v, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out sec))
+                return sec < 0 ? 0 : sec;
+
+            // 形式二：HTTP 日期 → 算到现在的秒数
+            DateTime when;
+            if (DateTime.TryParse(v, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AdjustToUniversal |
+                    System.Globalization.DateTimeStyles.AssumeUniversal, out when))
+            {
+                double d = (when.ToUniversalTime() - DateTime.UtcNow).TotalSeconds;
+                if (d <= 0) return 0;                 // 已经过期 = 立刻可重试
+                if (d > 86400) d = 86400;             // 荒谬的大值直接夹住
+                return (int)Math.Ceiling(d);
+            }
+            return 0;
+        }
+
+        /// <summary>
+        /// 从响应头里取 `Retry-After`（大小写不敏感，允许 "Retry-After: 120" 这种）。
+        /// 找不到返回 0。
+        /// </summary>
+        internal static int ExtractRetryAfter(string headerText)
+        {
+            if (string.IsNullOrEmpty(headerText)) return 0;
+            foreach (string raw in headerText.Split('\n'))
+            {
+                string line = raw.Trim();
+                int colon = line.IndexOf(':');
+                if (colon <= 0) continue;
+                string name = line.Substring(0, colon).Trim();
+                if (!string.Equals(name, "Retry-After", StringComparison.OrdinalIgnoreCase)) continue;
+                return ParseRetryAfter(line.Substring(colon + 1));
+            }
+            return 0;
         }
 
         /// <summary>正文是否像限流页。只匹配短文本，避免把小说正文误判。</summary>
@@ -765,16 +832,37 @@ namespace TomatoBiquga
             return "未知";
         }
 
-        private static void NoteThrottle()
+        internal static void NoteThrottle()
         {
             if (_throttleHits < 1000) _throttleHits++;
+            _consecutiveOk = 0;          // 刚被限流：连续成功计数归零
         }
 
-        private static void NoteSuccess()
+        /// <summary>
+        /// 成功一次。**加迟滞**（照 Scrapling 的 AutoThrottle）：
+        /// 连续成功 <see cref="RecoverAfterSuccesses"/> 次才把限流计数减 1。
+        ///
+        /// ★ 原来是一成功就减 1 —— 于是并发数在两个值之间**来回抖**：
+        ///   限流→降、成功→升、再限流→再降…… 而站点看到的是"这个 IP 一直在试探"，
+        ///   反而更容易被升级限制。加迟滞之后，只有"确实稳定下来了"才恢复。
+        /// </summary>
+        internal static void NoteSuccess()
         {
-            // 成功一次就消一点，让并发能缓慢恢复；连续失败才会真正把并发压下来
-            if (_throttleHits > 0) _throttleHits--;
+            if (_throttleHits <= 0) { _consecutiveOk = 0; return; }
+            _consecutiveOk++;
+            if (_consecutiveOk < RecoverAfterSuccesses) return;
+            _consecutiveOk = 0;
+            _throttleHits--;
         }
+
+        /// <summary>连续成功多少次才允许把并发恢复一档（迟滞阈值）</summary>
+        internal const int RecoverAfterSuccesses = 5;
+
+        /// <summary>连续成功计数（迟滞用）</summary>
+        private static int _consecutiveOk;
+
+        /// <summary>上一次响应里 `Retry-After` 的秒数；0 = 站点没给</summary>
+        public static int LastRetryAfterSeconds;
 
         /// <summary>当前建议的并发数（配合 <see cref="AdaptiveWorkers"/> 用）</summary>
         public static int ThrottleHits { get { return _throttleHits; } }
@@ -783,6 +871,8 @@ namespace TomatoBiquga
         public static void ResetThrottle()
         {
             _throttleHits = 0;
+            _consecutiveOk = 0;
+            LastRetryAfterSeconds = 0;
         }
 
         /// <summary>
@@ -844,6 +934,11 @@ namespace TomatoBiquga
                     args.Append(" --data-binary \"").Append(body.Replace("\"", "\\\"")).Append('"');
                 }
                 args.Append(" -o \"").Append(tmp).Append('"');
+                // ★ 响应头也存一份：要读 `Retry-After`（站点让你等多久）。
+                //   以前完全不读这个头，一律按 2s/4s/8s 指数退避 ——
+                //   站点说"120 秒后再来"，我们 2 秒就砸回去，于是被罚得更狠。
+                string hdr = tmp + ".hdr";
+                args.Append(" -D \"").Append(hdr).Append('"');
                 // 状态码走 -w（curl 把它写到 stdout），响应体走 -o（写进文件）。
                 // ★ 绝不可以用 `> 文件` 这种 shell 重定向：UseShellExecute=false 时
                 //   ProcessStartInfo 是**直接启动 curl.exe**，不经过 cmd.exe，
@@ -875,6 +970,13 @@ namespace TomatoBiquga
 
                 if (!File.Exists(tmp)) throw new Exception("curl 没有产生输出文件");
                 LastStatusCode = ParseHttpCode(stdout);
+                // 读响应头里的 Retry-After（读不到就保持 0）
+                try
+                {
+                    if (File.Exists(hdr))
+                        LastRetryAfterSeconds = ExtractRetryAfter(File.ReadAllText(hdr));
+                }
+                catch { }
                 var bytes = File.ReadAllBytes(tmp);
                 if (bytes.Length == 0) throw new Exception("curl 返回空内容");
                 return Decode(bytes);
@@ -882,6 +984,7 @@ namespace TomatoBiquga
             finally
             {
                 try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                try { if (File.Exists(tmp + ".hdr")) File.Delete(tmp + ".hdr"); } catch { }
             }
         }
 
