@@ -2667,6 +2667,83 @@ namespace TomatoBiquga
 
             // ---------- 队列下载前要确认（书名/作者/章数）----------
             TestQueueConfirm();
+
+            // ---------- 录制 / 回放（调规则时不再打站点）----------
+            TestRecordReplay();
+        }
+
+        /// <summary>
+        /// 录制 / 回放：**录一次真实响应，之后不联网也能复现同样的内容**。
+        ///
+        /// ★ 为什么做（照着 Scrapling 的 Development Mode 学的）：
+        ///   调站点规则必须反复抓真实页面，而站点会限流 —— 实测有一次两个站
+        ///   同时把我拒了，当天再也验不了任何规则。
+        ///   有了录制/回放，改解析逻辑时用录好的 HTML 反复试，**一次都不打站点**。
+        ///
+        /// 这里只测**纯逻辑**（不联网）：键的稳定性、存/取往返、未命中行为。
+        /// 真实联网的往返另有 RecDiag 探针跑过（143228 字符逐字一致）。
+        /// </summary>
+        private static void TestRecordReplay()
+        {
+            string oldRec = Http.RecordDir, oldRep = Http.ReplayDir;
+            bool oldStrict = Http.ReplayStrict;
+            string dir = Path.Combine(Path.GetTempPath(), "nd_rec_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                // ① 缓存键：同输入必须同键，否则"录了却回放不中"
+                string k1 = Http.CacheKey("GET", "http://x/1", null);
+                string k2 = Http.CacheKey("GET", "http://x/1", null);
+                Eq("录制：同请求的缓存键稳定", k1, k2);
+                Check("录制：缓存键非空且长度合理", k1 != null && k1.Length == 32);
+                Check("录制：URL 不同键不同",
+                    Http.CacheKey("GET", "http://x/2", null) != k1);
+                Check("录制：方法不同键不同",
+                    Http.CacheKey("POST", "http://x/1", null) != k1);
+                Check("录制：请求体不同键不同",
+                    Http.CacheKey("POST", "http://x/1", "a=1") !=
+                    Http.CacheKey("POST", "http://x/1", "a=2"));
+
+                // ② 存 / 取往返（纯本地文件，不联网）
+                Directory.CreateDirectory(dir);
+                Http.RecordDir = dir;
+                Http.ReplayDir = "";
+                Http.ReplayStrict = false;
+                Http.SaveRecordText("GET", "http://x/book/1", null, "第一章 正文");
+                Http.RecordDir = "";
+
+                Http.ReplayDir = dir;
+                Http.ReplayStrict = true;
+                int before = Http.ReplayHits;
+                byte[] got = Http.TryReplay("GET", "http://x/book/1", null);
+                Check("录制：回放能取回内容", got != null && got.Length > 0);
+                Eq("录制：回放内容一字不差", "第一章 正文", Encoding.UTF8.GetString(got));
+                Eq("录制：命中计数 +1", before + 1, Http.ReplayHits);
+                Eq("录制：后端标记为回放", "回放", Http.LastBackend);
+
+                // ③ 未命中：严格模式必须抛错（不能偷偷联网），宽松模式返回 null
+                bool threw = false;
+                try { Http.TryReplay("GET", "http://x/book/never", null); }
+                catch { threw = true; }
+                Check("录制：严格模式下未命中要抛错（不偷偷联网）", threw);
+
+                Http.ReplayStrict = false;
+                Check("录制：宽松模式下未命中返回 null（交给联网兜底）",
+                    Http.TryReplay("GET", "http://x/book/never2", null) == null);
+
+                // ④ 没开录制时不许写盘（正常使用绝不产生垃圾文件）
+                Http.ReplayDir = "";
+                Http.RecordDir = "";
+                int n0 = Directory.GetFiles(dir).Length;
+                Http.SaveRecordText("GET", "http://x/book/2", null, "不该被写");
+                Eq("录制：没开录制时不写任何文件", n0, Directory.GetFiles(dir).Length);
+            }
+            finally
+            {
+                Http.RecordDir = oldRec;
+                Http.ReplayDir = oldRep;
+                Http.ReplayStrict = oldStrict;
+                try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
+            }
         }
 
         /// <summary>

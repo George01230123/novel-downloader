@@ -23,6 +23,29 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
+// 1.6.5：加「录制 / 回放」—— 调站点规则时不再反复打站点。
+//        · 起因（用户问 Scrapling 对项目有没有用）：查了官方文档，它是 Python 框架、
+//          要 Python 3.10+ 和整套浏览器，作为依赖引入和"单文件免安装 236KB"完全冲突 ——
+//          但它的 Development Mode 值得学：
+//          "Cache responses to disk on the first run and replay them on subsequent runs
+//           — iterate on your parse() logic without re-hitting the target servers."
+//        · 我自己的痛点是真实的：为了验规则反复抓真实页面，
+//          有一次两个站同时把我拒了（当天再也验不了任何规则）。
+//        · 做法（Http 是唯一的网络咽喉点，放这里最省事）：
+//          Http.RecordDir  非空 → 每个成功响应存一份（.body + .meta）
+//          Http.ReplayDir  非空 → 命中就返回，**一个字节都不联网**
+//          Http.ReplayStrict    → 未命中抛错（基准测试用）；默认宽松，回落联网
+//          命令行：--record <dir> / --replay <dir> / --replay-strict
+//        · 为什么存**已解码的文本**（UTF-8）而不是原始字节：
+//          原始字节要靠页面 charset 才能解回文字，而站点声明经常不可靠
+//          （实测有声明 gbk 实际 utf-8 的）。存解析层真正看到的那份文本，
+//          回放时不用再猜一次编码，也就不会"录的时候正常、回放时乱码"。
+//        · 实测（RecDiag 探针，联网一次 + 严格回放）：
+//          录制 143,228 字符；严格回放（不联网）143,228 字符；
+//          **逐字完全一致**；未录制的地址在严格模式下立刻抛错（没有偷偷联网）。
+//        · 加 12 条断言：缓存键稳定/方法/URL/请求体不同则键不同、
+//          存取往返一字不差、命中计数与"回放"后端标记、
+//          严格模式未命中抛错、宽松模式返回 null、没开录制时不写任何文件。
 // 1.6.4：任务队列下载前先弹确认框（用户提出的功能）。
 //        · 需求：队列里输入书名后，弹窗告诉用户「书名 / 作者 / 一共几章」，
 //          问「是否下载这本」，点确认才开始下。
@@ -316,6 +339,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.6.4.0")]
-[assembly: AssemblyFileVersion("1.6.4.0")]
-[assembly: AssemblyInformationalVersion("1.6.4")]
+[assembly: AssemblyVersion("1.6.5.0")]
+[assembly: AssemblyFileVersion("1.6.5.0")]
+[assembly: AssemblyInformationalVersion("1.6.5")]

@@ -136,6 +136,134 @@ namespace TomatoBiquga
 
         public static bool CurlAvailable { get { return CurlPath != null; } }
 
+        // ============================================================
+        //  录制 / 回放（照着 Scrapling 的 Development Mode 学的）
+        //
+        //  为什么需要：调站点规则时必须反复抓真实页面，而站点会限流 ——
+        //  实测有一次两个站同时把我拒了（"这两个站现在都在拒我的请求"），
+        //  当天就再也验不了任何规则。
+        //  录制一次真实响应，之后改解析逻辑用回放反复试，**一次都不用打站点**。
+        //
+        //  用法（两个都留空 = 正常联网，行为完全不变）：
+        //    Http.RecordDir = @"D:\rec";   // 抓到的响应存进去
+        //    Http.ReplayDir = @"D:\rec";   // 只读这里，命中就不联网
+        //  回放未命中时：默认**回落到真实联网**并记一行日志（宽松模式）——
+        //  免得"漏录一个页面"变成"整条流程直接失败"。
+        //  SetReplayStrict(true) 可以改成严格模式（未命中就抛错），用于基准测试。
+        // ============================================================
+
+        /// <summary>录制目录。空 = 不录制。</summary>
+        public static string RecordDir = "";
+        /// <summary>回放目录。空 = 不回放（正常联网）。</summary>
+        public static string ReplayDir = "";
+        /// <summary>回放未命中时是否抛错（默认 false：回落到真实联网）</summary>
+        public static bool ReplayStrict;
+
+        /// <summary>本次进程里回放命中的次数（自测/探针用来看回放是否真的生效）</summary>
+        public static int ReplayHits { get { return _replayHits; } }
+        private static int _replayHits;
+        /// <summary>回放未命中的次数</summary>
+        public static int ReplayMisses { get { return _replayMisses; } }
+        private static int _replayMisses;
+
+        private static readonly object _recLock = new object();
+
+        /// <summary>缓存键：方法 + URL + 请求体 的 SHA-256（前 16 字节，够用且文件名短）</summary>
+        internal static string CacheKey(string method, string url, string body)
+        {
+            string raw = (method ?? "GET") + "\n" + (url ?? "") + "\n" + (body ?? "");
+            try
+            {
+                using (var sha = System.Security.Cryptography.SHA256.Create())
+                {
+                    byte[] h = sha.ComputeHash(Encoding.UTF8.GetBytes(raw));
+                    var sb = new StringBuilder(32);
+                    for (int i = 0; i < 16; i++) sb.Append(h[i].ToString("x2"));
+                    return sb.ToString();
+                }
+            }
+            catch
+            {
+                // 极端情况下退回一个稳定的弱键（不能因为哈希库出问题就不抓了）
+                return (raw.GetHashCode() & 0x7fffffff).ToString("x8");
+            }
+        }
+
+        /// <summary>
+        /// 回放：命中就返回内容（字符串），未命中返回 null。
+        /// meta 文件（.meta）第一行是状态码，正文在 .body 里。
+        /// </summary>
+        internal static byte[] TryReplay(string method, string url, string body)
+        {
+            if (string.IsNullOrEmpty(ReplayDir)) return null;
+            string key = CacheKey(method, url, body);
+            string f = Path.Combine(ReplayDir, key + ".body");
+            try
+            {
+                if (File.Exists(f))
+                {
+                    System.Threading.Interlocked.Increment(ref _replayHits);
+                    LastBackend = "回放";
+                    LastStatusCode = ReadCachedStatus(Path.Combine(ReplayDir, key + ".meta"));
+                    return File.ReadAllBytes(f);
+                }
+            }
+            catch { }
+            System.Threading.Interlocked.Increment(ref _replayMisses);
+            if (ReplayStrict)
+                throw new Exception("回放缓存里没有这个请求（严格模式）：" + method + " " + Shorten(url));
+            return null;
+        }
+
+        private static int ReadCachedStatus(string metaPath)
+        {
+            try
+            {
+                if (!File.Exists(metaPath)) return 200;
+                string first = File.ReadAllLines(metaPath)[0].Trim();
+                int code;
+                return int.TryParse(first, out code) ? code : 200;
+            }
+            catch { return 200; }
+        }
+
+        /// <summary>录制：把响应写盘（body + meta）。失败只忽略 —— 录制是辅助功能。</summary>
+        internal static void SaveRecord(string method, string url, string body, byte[] data)
+        {
+            if (string.IsNullOrEmpty(RecordDir) || data == null) return;
+            try
+            {
+                lock (_recLock)
+                {
+                    if (!Directory.Exists(RecordDir)) Directory.CreateDirectory(RecordDir);
+                    string key = CacheKey(method, url, body);
+                    string bp = Path.Combine(RecordDir, key + ".body");
+                    // 已经录过的不覆盖：同一 URL 第一次的结果才是当时真实看到的
+                    if (!File.Exists(bp)) File.WriteAllBytes(bp, data);
+                    string mp = Path.Combine(RecordDir, key + ".meta");
+                    if (!File.Exists(mp))
+                        File.WriteAllText(mp,
+                            LastStatusCode + "\n" + (method ?? "GET") + "\n" + (url ?? "") + "\n",
+                            new UTF8Encoding(false));
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 录制一段**已解码的文本**：按 UTF-8 存盘，回放时也按 UTF-8 取回。
+        ///
+        /// ★ 为什么不存原始字节：原始字节要靠页面里的 charset 才能解回文字，
+        ///   而两个站的 charset 声明经常不可靠（实测有声明 gbk 实际 utf-8 的）。
+        ///   我们真正要复用的是"解析层看到的那份文本"，直接存 UTF-8 最稳：
+        ///   回放时不需要再猜一次编码，也就不会"录的时候正常、回放时乱码"。
+        /// </summary>
+        internal static void SaveRecordText(string method, string url, string body, string text)
+        {
+            if (string.IsNullOrEmpty(RecordDir) || text == null) return;
+            SaveRecord(method, url, body, Encoding.UTF8.GetBytes(text));
+        }
+
         /// <summary>抓一个页面（自动重试）</summary>
         public static string Get(string url, string referer = null)
         {
@@ -255,6 +383,14 @@ namespace TomatoBiquga
         /// </summary>
         public static byte[] GetBytes(string url, string referer = null)
         {
+            // 回放优先：封面这类二进制同样支持录制/回放
+            try
+            {
+                byte[] cached = TryReplay("GET", url, null);
+                if (cached != null && cached.Length > 0) return cached;
+            }
+            catch (Exception) { throw; }
+
             for (int attempt = 0; attempt < 2; attempt++)
             {
                 try
@@ -262,7 +398,11 @@ namespace TomatoBiquga
                     byte[] data;
                     if (CurlAvailable) data = FetchBytesWithCurl(url, referer);
                     else data = FetchBytesWithDotNet(url, referer);
-                    if (data != null && data.Length > 0) return data;
+                    if (data != null && data.Length > 0)
+                    {
+                        SaveRecord("GET", url, null, data);      // 录制原始字节
+                        return data;
+                    }
                 }
                 catch { }
                 if (attempt == 0) Thread.Sleep(300);
@@ -347,6 +487,22 @@ namespace TomatoBiquga
 
         private static string Request(string url, string body, string referer)
         {
+            // ★ 回放优先：命中就直接用录好的响应，**一个字节都不联网**。
+            //   放在重试循环外面：回放要么命中（成功返回），要么未命中（继续联网）。
+            //   未命中在宽松模式下**不抛错**，落到下面的真实请求 ——
+            //   免得"漏录一个页面"变成"整条流程失败"。
+            byte[] replayed = null;
+            try { replayed = TryReplay(body == null ? "GET" : "POST", url, body); }
+            catch (Exception) { throw; }        // 严格模式：把"缓存里没有"如实抛给调用方
+            if (replayed != null)
+            {
+                // 录制存的是 UTF-8 文本（见 SaveRecordText），所以这里直接按 UTF-8 解，
+                // 不再走 Decode() 的 charset 探测 —— 那会再猜一次编码，可能猜错。
+                string text = Encoding.UTF8.GetString(replayed);
+                if (!string.IsNullOrEmpty(text)) return text;
+                // 录制内容解不出文字（空的/坏文件）→ 当未命中，继续联网
+            }
+
             Exception last = null;
             for (int attempt = 0; attempt < MaxRetries; attempt++)
             {
@@ -394,6 +550,8 @@ namespace TomatoBiquga
                     }
 
                     NoteSuccess();
+                    // 录制（只在 RecordDir 非空时生效；失败静默忽略）
+                    SaveRecordText(body == null ? "GET" : "POST", url, body, text);
                     return text;
                 }
                 catch (Exception ex)

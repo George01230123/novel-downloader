@@ -106,6 +106,21 @@ namespace TomatoBiquga
             }
 #endif
 
+            // ★ 录制 / 回放（开发与调规则用，正常启动不传参数时行为完全不变）
+            //
+            //   小说下载器.exe --record D:\rec    抓到的每个响应存进 D:\rec
+            //   小说下载器.exe --replay D:\rec    只读 D:\rec，命中就不联网
+            //   小说下载器.exe --replay D:\rec --replay-strict   未命中直接报错
+            //
+            //   为什么放在这里（而不是只给探针用）：探针是独立进程、自己 new 的，
+            //   写到 Http.RecordDir 就够；但**程序本身**也要能录 —— 真实下载一遍
+            //   才能录到"下载路径"用到的那些请求。
+            try { ApplyRecordReplayArgs(args); }
+            catch (Exception ex)
+            {
+                try { Console.Error.WriteLine("录制/回放参数解析失败（已忽略）：" + ex.Message); } catch { }
+            }
+
             EnableHighDpi();
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -117,6 +132,37 @@ namespace TomatoBiquga
             {
                 MessageBox.Show("程序出错：" + ex.Message, "小说下载器",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        /// <summary>
+        /// 解析 `--record &lt;dir&gt;` / `--replay &lt;dir&gt;` / `--replay-strict`。
+        ///
+        /// 抽成独立方法是为了**可测**：参数解析错了不会崩，但"静默不生效"最难查
+        /// （录了半小时发现录的是默认目录）。所以逻辑单独拎出来，离线单测直接调。
+        /// </summary>
+        internal static void ApplyRecordReplayArgs(string[] args)
+        {
+            if (args == null) return;
+            for (int i = 0; i < args.Length; i++)
+            {
+                string a = args[i] == null ? "" : args[i].Trim();
+                if (string.Equals(a, "--record", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(a, "-record", StringComparison.OrdinalIgnoreCase))
+                {
+                    string d = i + 1 < args.Length ? (args[i + 1] == null ? "" : args[i + 1].Trim()) : "";
+                    if (d.Length > 0) { Http.RecordDir = d; i++; }
+                }
+                else if (string.Equals(a, "--replay", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(a, "-replay", StringComparison.OrdinalIgnoreCase))
+                {
+                    string d = i + 1 < args.Length ? (args[i + 1] == null ? "" : args[i + 1].Trim()) : "";
+                    if (d.Length > 0) { Http.ReplayDir = d; i++; }
+                }
+                else if (string.Equals(a, "--replay-strict", StringComparison.OrdinalIgnoreCase))
+                {
+                    Http.ReplayStrict = true;
+                }
             }
         }
 
