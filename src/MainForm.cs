@@ -261,14 +261,18 @@ namespace TomatoBiquga
             // 完整含义放在 tooltip 和日志里。
             chkAutoSite = new CheckBox
             {
-                Text = "自动",
+                Text = "自动最优",
                 AutoSize = true,
                 Margin = new Padding(10, 5, 0, 0),
             };
             new ToolTip().SetToolTip(chkAutoSite,
-                "【自动选最快】按实测综合分（搜索 + 载入目录 + 抓一章正文）自动挑最快的站点。\n" +
-                "启动时在后台实测一次，结果缓存 24 小时；点「检测站点」可立即重测。\n" +
-                "全部站点都不可用时，自动回退到笔趣阁（PC版）。");
+                "【自动选最优】搜索之后自动比较各站，选「同名书里下完最快」的那本。\n" +
+                "判断依据：预计总时长 = 章节数 × 每章耗时（越小越好）。\n" +
+                "  · 只认书名**完全一致**的，相近书名不参与；\n" +
+                "  · 章节数从搜索结果的「最新章节」里估，不额外抓目录；\n" +
+                "  · 每章耗时取「检测站点」的实测值。\n" +
+                "比较最多 8 秒、最多 4 个站；选中别的站会自动切过去并载入目录。\n" +
+                "启动时仍会在后台实测一次站点速度（缓存 24 小时）。");
             chkAutoSite.CheckedChanged += (s, e) =>
             {
                 _autoSite = chkAutoSite.Checked;
@@ -281,7 +285,9 @@ namespace TomatoBiquga
             row1.Controls.AddRange(new Control[] { lblSite, cboSite, lblKw, kwHost, btnSearch, btnLocal, btnLoad, btnReload });
 
             var lblOut = new Label { Text = "保存到：", AutoSize = true, Margin = new Padding(0, 6, 2, 0) };
-            var outHost = new Panel { Width = 230, Height = 24, Margin = new Padding(0, 1, 6, 0) };
+            // 宽度从 230 收到 190：给「自动最优」这四个字让出位置。
+            // 布局断言在 820px 最小窗口下守着 —— 加宽复选框会把「离线模式」顶出去（实测过一次）。
+            var outHost = new Panel { Width = 190, Height = 24, Margin = new Padding(0, 1, 6, 0) };
             txtOutput = new TextBox
             {
                 Dock = DockStyle.Fill,
@@ -1296,6 +1302,14 @@ namespace TomatoBiquga
                 // ② 结果落盘：这次搜索下次能重放，同时把书并进累积索引
                 if (list.Count > 0) SearchIndex.PutQuery(kw, list, searchSiteKey);
                 FillBooks(list, kw);
+
+                // ★ 开了「自动选最优」就比一比别的站：同名书里谁总时长最短。
+                //   放在这里（而不是下载时）的原因：用户下一步就是"载入目录 → 勾章节"，
+                //   选站必须发生在**载入之前**，否则等于已经用错源把目录抓完了。
+                //   只在"本站确实有同名书"时比较 —— 一个都没有的情况下面那段
+                //   本来就会去跨站找，别重复扫两遍。
+                if (list.Count > 0 && _autoSite) TryAutoPickBestSite(kw, list);
+
                 if (list.Count == 0)
                 {
                     if (site.Name == "番茄小说")
@@ -1408,6 +1422,175 @@ namespace TomatoBiquga
         /// 保守之处：只回报**标题含整词**（score ≥ 600）的结果，避免把
         /// "按单字沾边"的那一堆噪音也报成"这个站有"。
         /// </summary>
+        /// <summary>自动选站进行中（防止"切站 → 再搜索 → 又切站"绕圈）</summary>
+        private bool _autoPicking;
+
+        /// <summary>
+        /// 「自动选最优」：同名书里，按 **章节数 × 每章耗时**（预计总时长）选最小的那个站。
+        ///
+        /// 用户的要求是"同名 + 最快 + 章数最多"。这三条会打架，所以合成一个目标：
+        /// 总时长越小越好（详见 SitePicker 的注释）。
+        ///
+        /// 为什么要跨站扫：**只有比较过才知道谁最优**。所以即使当前站搜到了，
+        /// 也要去别的站问一遍 —— 但给**预算**（8 秒）和**命中上限**（4 个），
+        /// 免得为了"选站"让用户干等。
+        ///
+        /// 为什么不用抓目录拿真实章数：pmzw 实测一次目录 25 秒、笔趣阁 PC 更久。
+        /// 搜索表格里自带「最新章节」，从里面解析章号就够比较了（见 SitePicker.EstimateChapters）。
+        /// </summary>
+        private void TryAutoPickBestSite(string kw, List<BookInfo> currentList)
+        {
+            if (!_autoSite || _autoPicking) return;
+            if (string.IsNullOrEmpty(kw)) return;
+            _autoPicking = true;
+            try
+            {
+                string curKey = SiteKeyOf(_site);
+                var cands = new List<SitePicker.Candidate>();
+
+                // 本站在当前结果里的最佳同名书
+                BookInfo own = BestSameTitle(currentList, kw);
+                if (own != null) cands.Add(MakeCandidate(curKey, SiteRegistry.LabelOf(curKey), own, kw));
+
+                // 其他站（有预算、有上限）
+                List<SiteBookHit> hits = null;
+                try
+                {
+                    Log("· 自动选最优：正在比较其他站点（最多 8 秒）…");
+                    hits = ScanSitesForExact(kw, curKey, Log, delegate () { return _cancel; }, 4, 8000);
+                }
+                catch (Exception ex) { Log("   · 跨站比较中断（不影响当前结果）：" + ex.Message); }
+                if (hits != null)
+                {
+                    foreach (var h in hits)
+                    {
+                        if (h == null || h.Book == null) continue;
+                        cands.Add(MakeCandidate(h.SiteKey, h.SiteLabel, h.Book, kw));
+                    }
+                }
+
+                string reason;
+                var best = SitePicker.Pick(cands, out reason);
+                if (cands.Count >= 2) Log(SitePicker.Describe(cands, best));
+                Log("   · " + reason);
+                if (best == null) return;
+
+                if (string.Equals(best.SiteKey, curKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    Log("   → 当前站点已经是最优的，不用切换。");
+                    return;
+                }
+
+                // 换到最优站点，并把那本书载入目录（用户接下来直接勾章节就行）
+                Log("   → 自动切到「" + best.SiteLabel + "」并载入《" + best.Title + "》…");
+                SelectSiteKey(best.SiteKey);
+                var target = FindBookByTitle(best.Title, best.SiteKey, kw);
+                if (target != null) BeginInvoke(new Action(delegate { DoLoadBookSpecific(target, kw); }));
+            }
+            catch (Exception ex)
+            {
+                Log("自动选最优失败（不影响手动操作）：" + ex.Message);
+            }
+            finally { _autoPicking = false; }
+        }
+
+        /// <summary>把一条搜索结果变成候选项（章数从「最新章节」估，速度取站点评分缓存）</summary>
+        internal SitePicker.Candidate MakeCandidate(string siteKey, string label, BookInfo b, string kw)
+        {
+            var c = new SitePicker.Candidate
+            {
+                SiteKey = siteKey,
+                SiteLabel = label,
+                Title = b != null ? b.Title : "",
+                Exact = b != null && SitePicker.IsSameTitle(b.Title, kw),
+            };
+            // 章数：优先用搜索行里的「最新章节」
+            if (b != null && !string.IsNullOrEmpty(b.Desc))
+            {
+                int n = SitePicker.EstimateChapters(b.Desc);
+                if (n > 0) { c.Chapters = n; c.ChaptersSource = "按最新章节估"; }
+            }
+            // 速度：站点评分缓存里有就用
+            if (_siteScores != null)
+            {
+                foreach (var s in _siteScores)
+                {
+                    if (s == null || !string.Equals(s.Key, siteKey, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (s.ChapterMeasured && s.ChapterMs > 0 && !double.IsInfinity(s.ChapterMs))
+                        c.MsPerChapter = s.ChapterMs;
+                    break;
+                }
+            }
+            return c;
+        }
+
+        /// <summary>结果列表里标题与关键词完全一致的那一条（没有就 null）</summary>
+        private BookInfo BestSameTitle(List<BookInfo> list, string kw)
+        {
+            if (list == null) return null;
+            BookInfo best = null;
+            int bestCount = -1;
+            foreach (var b in list)
+            {
+                if (b == null || string.IsNullOrEmpty(b.Title)) continue;
+                if (!SitePicker.IsSameTitle(b.Title, kw)) continue;
+                int n = string.IsNullOrEmpty(b.Desc) ? 0 : SitePicker.EstimateChapters(b.Desc);
+                if (best == null || n > bestCount) { best = b; bestCount = n; }
+            }
+            return best;
+        }
+
+        /// <summary>按站点 key 切换下拉框（切换会触发 ApplySiteSelection 重建站点对象）</summary>
+        private void SelectSiteKey(string key)
+        {
+            if (cboSite == null || string.IsNullOrEmpty(key)) return;
+            int idx = SiteRegistry.IndexOf(key);
+            if (idx < 0 || idx >= cboSite.Items.Count) return;
+            _reloadingSites = false;          // 允许 SelectedIndexChanged 触发真正的切换
+            cboSite.SelectedIndex = idx;
+        }
+
+        /// <summary>在某个站的最新搜索结果里按书名找一本（用于切站后载入）</summary>
+        private BookInfo FindBookByTitle(string title, string siteKey, string kw)
+        {
+            try
+            {
+                var d = SiteRegistry.ByKey(siteKey);
+                if (d == null || d.Factory == null) return null;
+                var s = d.Factory();
+                var found = s.Search(kw, null);
+                if (found == null) return null;
+                BookInfo best = null;
+                foreach (var b in found)
+                {
+                    if (b == null || string.IsNullOrEmpty(b.Title)) continue;
+                    if (!SitePicker.IsSameTitle(b.Title, title)) continue;
+                    best = b; break;
+                }
+                if (best != null && string.IsNullOrEmpty(best.Site)) best.Site = siteKey;
+                return best;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>载入指定搜索结果（自动选站切过去之后用）</summary>
+        private void DoLoadBookSpecific(BookInfo target, string kw)
+        {
+            if (target == null) return;
+            try
+            {
+                // 列表里只放这一本并选中它 —— DoLoadBook 读的是"选中项"，这样最稳
+                FillBooks(new List<BookInfo> { target }, kw);
+                if (lstBooks != null && lstBooks.Items.Count > 0)
+                {
+                    lstBooks.Items[0].Selected = true;
+                    lstBooks.Items[0].Focused = true;
+                }
+                DoLoadBook();
+            }
+            catch (Exception ex) { Log("载入最优站点的书失败：" + ex.Message); }
+        }
+
         private List<SiteBookHit> ScanOtherSitesForExact(string kw, string skipSiteKey)
         {
             if (_cancel) return new List<SiteBookHit>();

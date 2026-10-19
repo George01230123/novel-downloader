@@ -2815,6 +2815,92 @@ namespace TomatoBiquga
 
             // ---------- 新源（排名中文网）+ 为它加的两个引擎能力 ----------
             TestPmzwAndNewEngineFeatures();
+
+            // ---------- 自动选最优站点（同名 + 最全 + 最快）----------
+            TestSitePicker();
+        }
+
+        /// <summary>
+        /// 「自动选最优」的决策逻辑。
+        ///
+        /// 用户要求：**同名 + 下载速度最快 + 章节数最多**。三条会打架，所以定成两段式：
+        ///   ① 硬过滤：书名必须**完全一致**（相近书名不参与）；
+        ///   ② 章数达到"最多者"的 95% 才算足够全；
+        ///   ③ 在足够全的里面选**预计总时长最短**的。
+        ///
+        /// 为什么不能只比总时长：1000 章×80ms（80 秒）会赢过 1800 章×60ms（108 秒），
+        /// 但前者少 800 章，下完还得补 —— 那不是"最优"。
+        /// 为什么不能只比章数：只多 6 章却慢 6 倍的站也不该赢。
+        /// </summary>
+        private static void TestSitePicker()
+        {
+            // ① 书名归一化：只认完全一致的
+            Check("选站：书名一致（带书名号也算）", SitePicker.IsSameTitle("《万相之王》", "万相之王"));
+            Check("选站：名字一致但要忽略后缀", SitePicker.IsSameTitle("万相之王最新章节", "万相之王"));
+            Check("选站：相近但不同名 → 不算", !SitePicker.IsSameTitle("万相之王（同人）", "万相之王"));
+            Check("选站：前缀相同的另一本 → 不算", !SitePicker.IsSameTitle("万相之王外传", "万相之王"));
+            Check("选站：空串不算", !SitePicker.IsSameTitle("", "万相之王"));
+
+            // ② 章数从「最新章节」估（不抓目录）
+            Eq("选站：从第一千八百三十七章估出 1837", 1837, SitePicker.EstimateChapters("第一千八百三十七章 大结局"));
+            Eq("选站：从第1204章估出 1204", 1204, SitePicker.EstimateChapters("第1204章 圣棘冠"));
+            Eq("选站：上架感言估不出（0）", 0, SitePicker.EstimateChapters("上架感言"));
+
+            // ③ 没有任何候选
+            string why;
+            Check("选站：没有候选时返回 null", SitePicker.Pick(null, out why) == null);
+            var none = new List<SitePicker.Candidate>();
+            Check("选站：空列表返回 null", SitePicker.Pick(none, out why) == null);
+
+            // ④ 只有不同名的候选 → 不选（宁可不切，也不切错）
+            var onlyNear = new List<SitePicker.Candidate>
+            {
+                new SitePicker.Candidate { SiteKey = "a", SiteLabel = "A站", Chapters = 1800, MsPerChapter = 50, Exact = false },
+            };
+            Check("选站：只有相近书名时不选", SitePicker.Pick(onlyNear, out why) == null);
+            Check("选站：理由说明没同名", why.IndexOf("完全一致", StringComparison.Ordinal) >= 0);
+
+            // ⑤ 章数差距大 → 选章数多的（哪怕慢）
+            var gap = new List<SitePicker.Candidate>
+            {
+                new SitePicker.Candidate { SiteKey = "fast", SiteLabel = "快站", Chapters = 1000, MsPerChapter = 50, Exact = true },
+                new SitePicker.Candidate { SiteKey = "full", SiteLabel = "全站", Chapters = 1800, MsPerChapter = 200, Exact = true },
+            };
+            var p1 = SitePicker.Pick(gap, out why);
+            Eq("选站：章数差得多时选全的那个", "full", p1 == null ? null : p1.SiteKey);
+
+            // ⑥ 章数接近（差 6 章，在 5% 以内）→ 选快的
+            var close = new List<SitePicker.Candidate>
+            {
+                new SitePicker.Candidate { SiteKey = "pmzw", SiteLabel = "排名中文网", Chapters = 1831, MsPerChapter = 850, Exact = true },
+                new SitePicker.Candidate { SiteKey = "xbiquwk", SiteLabel = "笔尖中文", Chapters = 1838, MsPerChapter = 79, Exact = true },
+            };
+            var p2 = SitePicker.Pick(close, out why);
+            Eq("选站：章数接近时选快的（笔尖中文）", "xbiquwk", p2 == null ? null : p2.SiteKey);
+            Check("选站：理由里带够全门槛", why.IndexOf("门槛", StringComparison.Ordinal) >= 0);
+
+            // ⑦ 速度未知的站按保守估计，不该靠"未知"取胜
+            var unknownSpeed = new List<SitePicker.Candidate>
+            {
+                new SitePicker.Candidate { SiteKey = "u", SiteLabel = "未知速度", Chapters = 1800, MsPerChapter = 0, Exact = true },
+                new SitePicker.Candidate { SiteKey = "k", SiteLabel = "已知快", Chapters = 1800, MsPerChapter = 100, Exact = true },
+            };
+            var p3 = SitePicker.Pick(unknownSpeed, out why);
+            Eq("选站：速度未知的站不靠未知取胜", "k", p3 == null ? null : p3.SiteKey);
+
+            // ⑧ 全部速度未知 → 仍然能选出章数最多的（不返回 null）
+            var noSpeed = new List<SitePicker.Candidate>
+            {
+                new SitePicker.Candidate { SiteKey = "a", SiteLabel = "A", Chapters = 1500, MsPerChapter = 0, Exact = true },
+                new SitePicker.Candidate { SiteKey = "b", SiteLabel = "B", Chapters = 1800, MsPerChapter = 0, Exact = true },
+            };
+            var p4 = SitePicker.Pick(noSpeed, out why);
+            Eq("选站：全都没速度时选章数最多的", "b", p4 == null ? null : p4.SiteKey);
+
+            // ⑨ 时长格式化
+            Eq("选站：格式化成秒", "45 秒", SitePicker.FormatDuration(45000));
+            Eq("选站：格式化成分钟", "2 分 24 秒", SitePicker.FormatDuration(144000));
+            Eq("选站：未知时长", "—", SitePicker.FormatDuration(double.PositiveInfinity));
         }
 
         /// <summary>
