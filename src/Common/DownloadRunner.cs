@@ -703,7 +703,15 @@ namespace TomatoBiquga
                 Skipped++;
                 c.Text = "";
                 if (!SkippedChapters.Contains(c)) SkippedChapters.Add(c);
-                Log(string.Format("{0}跳过（站点侧空内容/公告）：{1}", prefix, c.Title));
+                // ★ 原因要**分开**：以前一律写"站点侧空内容/公告"。
+                //   但短文本可能是"正在手打中"（书真的没内容），
+                //   也可能是**被拦/限流的提示页**（等一会儿重试就有）。
+                //   两者处理方式完全不同，混在一起用户会白等或白换源。
+                string why = null;
+                try { why = SiteDiagnostics.DiagnoseShortChapter(text); } catch { }
+                if (string.IsNullOrEmpty(why)) why = "站点侧空内容/公告";
+                SkipReasons[c.Id] = why;
+                Log(string.Format("{0}跳过：{1} —— {2}", prefix, c.Title, why));
             }
             else
             {
@@ -844,6 +852,17 @@ namespace TomatoBiquga
         /// 收尾报告：把“缺了哪几章”单独写一个文件，比塞进表头可靠
         /// （表头是原地改写的，越写越长会盖到正文上）。
         /// </summary>
+        /// <summary>跳过的章 + 原因（缺号摘要 / 报告里用）</summary>
+        public Dictionary<string, string> SkipReasons = new Dictionary<string, string>();
+
+        /// <summary>把一章的章节号收进"缺号"列表（解析不出来就跳过）</summary>
+        private static void AddChapterNo(ChapterInfo c, List<int> into)
+        {
+            if (c == null || into == null) return;
+            int n;
+            if (ChapterNumber.TryParse(c.Title, out n)) into.Add(n);
+        }
+
         public void WriteMissingReport()
         {
             if (SkippedChapters.Count == 0 && FailedChapters.Count == 0) { ReportFile = null; return; }
@@ -879,9 +898,25 @@ namespace TomatoBiquga
                 {
                     n++;
                     sb.AppendLine(string.Format("{0}. 第 {1} 章 {2}", n, c.Order, c.Title));
+                    string why;
+                    if (SkipReasons.TryGetValue(c.Id, out why) && !string.IsNullOrEmpty(why))
+                        sb.AppendLine("   原因：" + why);
                     sb.AppendLine("   地址：" + ChapterUrl(c));
                 }
                 if (SkippedChapters.Count == 0) sb.AppendLine("（无）");
+
+                // ★ 缺号摘要：把"缺了哪几章"压缩成「12~15、40、88~89」。
+                //   以前报告里只有"第 N 章 <标题>"，而那个 N 是**列表序号**不是章节号，
+                //   用户根本看不出到底缺哪几章（尤其缺得多的时候）。
+                var missingNos = new List<int>();
+                foreach (var c in FailedChapters) AddChapterNo(c, missingNos);
+                foreach (var c in SkippedChapters) AddChapterNo(c, missingNos);
+                if (missingNos.Count > 0)
+                {
+                    sb.AppendLine();
+                    sb.AppendLine("【缺号摘要】" + ChapterNumber.DescribeRanges(missingNos));
+                    sb.AppendLine("（按标题里的章节号解析；「楔子/番外/序」这类没有章号的不计入）");
+                }
                 File.WriteAllText(ReportFile, sb.ToString(), new UTF8Encoding(true));
             }
             catch (Exception ex)

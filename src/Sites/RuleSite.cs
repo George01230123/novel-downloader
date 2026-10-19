@@ -336,7 +336,61 @@ namespace TomatoBiquga
             if (log != null)
                 log("目录完成：共 " + chapters.Count + " 章（" + chapters[0].Title + " → "
                     + chapters[chapters.Count - 1].Title + "）");
+
+            // ★ 目录顺序体检（只报警，**不重排**）。
+            //
+            //   起因：站点偶尔给逆序/乱序。整站逆序有 TocIsDescending 这个开关处理，
+            //   但**局部乱序**（比如某几章被插到别处）以前完全静默 ——
+            //   落盘顺序就错了，而落盘顺序错了之后「缺章补齐」按顺序插回也会跟着错。
+            //
+            //   为什么只报警不自动排：
+            //     · 「楔子 / 番外 / 序」没有章号，自动排会把它们挪到最前或最后；
+            //     · 章节号可能重复（分卷里重新编号），自动排会打乱站的意图。
+            //   所以交给用户看日志决定 —— 至少不再静默。
+            if (log != null)
+            {
+                try
+                {
+                    string warn = DescribeOrderProblem(chapters);
+                    if (!string.IsNullOrEmpty(warn)) log("   ⚠ 目录顺序体检：" + warn);
+                }
+                catch { }
+            }
             return book;
+        }
+
+        /// <summary>
+        /// 检查目录里"带章号的章节"是否整体有序；乱序就返回一句人话，正常返回 null。
+        /// 纯逻辑，便于离线断言（不碰网络）。
+        /// </summary>
+        internal static string DescribeOrderProblem(IList<ChapterInfo> chapters)
+        {
+            if (chapters == null || chapters.Count < 3) return null;
+
+            int prevNo = 0, inversions = 0, numbered = 0;
+            string firstBad = null;
+            foreach (var c in chapters)
+            {
+                if (c == null || c.IsVolume || string.IsNullOrEmpty(c.Title)) continue;
+                int no;
+                if (!ChapterNumber.TryParse(c.Title, out no)) continue;   // 楔子/番外不参与
+                numbered++;
+                if (prevNo > 0 && no < prevNo)
+                {
+                    inversions++;
+                    if (firstBad == null)
+                        firstBad = string.Format("「{0}」出现在第 {1} 章之后", c.Title, prevNo);
+                }
+                prevNo = no;
+            }
+
+            if (numbered < 3 || inversions == 0) return null;
+            // 少量倒序可能是"番外插在中间"的合理排法，超过 5% 才值得提醒
+            if (inversions * 20 < numbered) return null;
+            return string.Format("有 {0} 处章号倒序（共 {1} 章带号），例如 {2}。"
+                + "程序不会自动重排（楔子/番外没有章号，重排反而会打乱），"
+                + "如果落盘顺序不对，请把这本书的日志发给作者。",
+                inversions, numbered, firstBad);
         }
 
         /// <summary>抽章节链接；建索引并把 id→URL 记下来给批量路径用</summary>

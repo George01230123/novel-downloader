@@ -98,6 +98,41 @@ namespace TomatoBiquga
             return "目录页只有 " + html.Length + " 字符，内容太少 —— 可能被拦或站点异常";
         }
 
+        /// <summary>
+        /// 诊断"这一章抓到的正文太短"（&lt; 40 字符）到底是什么情况。
+        ///
+        /// ★ 以前一律写"站点侧空内容/公告"，但短文本至少有两种：
+        ///   ① 站点真的没内容（"正在手打中，请稍等片刻"）→ 换源也没用，认了；
+        ///   ② **被拦/限流的提示页**（"访问过于频繁"）→ 等一会儿重试就有。
+        ///   混在一起用户要么白等、要么白换源，所以这里分清楚。
+        ///
+        /// 返回 null 表示"看不出特殊原因"（调用方回落到默认文案）。
+        /// </summary>
+        public static string DiagnoseShortChapter(string text)
+        {
+            if (text == null) return "抓到的正文是空的";
+            string t = text.Trim();
+            if (t.Length == 0) return "抓到的正文是空的";
+
+            string low = t.ToLowerInvariant();
+            if (ContainsAny(low, BlockedMarkers))
+                return "疑似被拦/限流（正文里出现验证码或\"访问过于频繁\"之类）—— 等几分钟重试，不必换源";
+
+            // 站点常见的"这章还没写完"提示
+            if (low.IndexOf("正在手打", StringComparison.Ordinal) >= 0
+                || low.IndexOf("手打中", StringComparison.Ordinal) >= 0
+                || low.IndexOf("请稍等", StringComparison.Ordinal) >= 0
+                || low.IndexOf("本章未完", StringComparison.Ordinal) >= 0
+                || low.IndexOf("待更新", StringComparison.Ordinal) >= 0
+                || low.IndexOf("正在更新", StringComparison.Ordinal) >= 0)
+                return "站点这一章本身还没内容（\"正在手打中/待更新\"）—— 换源也没用，过几天再来";
+
+            if (t.Length <= 12)
+                return "正文只有 " + t.Length + " 个字符（疑似占位提示）—— 稍后重试看看";
+
+            return null;
+        }
+
         private static bool ContainsAny(string lowHtml, string[] markers)
         {
             if (string.IsNullOrEmpty(lowHtml) || markers == null) return false;

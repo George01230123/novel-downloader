@@ -2676,6 +2676,99 @@ namespace TomatoBiquga
 
             // ---------- 站点诊断：0 条时要说清是"没这本书"还是"改版/被拦" ----------
             TestSiteDiagnostics();
+
+            // ---------- 章节号归一化（缺号摘要 / 顺序体检的基础）----------
+            TestChapterNumber();
+        }
+
+        /// <summary>
+        /// 章节号归一化：`第12章 == 第十二章 == 第壹拾贰章 == 第１２章`。
+        ///
+        /// ★ 用途（三条都是真实缺陷）：
+        ///   ① 缺失报告只说"第 N 章 &lt;标题&gt;"，而 N 是**列表序号**不是章节号 ——
+        ///      用户看不出到底缺哪几章；有了号就能写"缺 12~15、40"。
+        ///   ② 目录**局部乱序**以前完全静默（`TocIsDescending` 只处理整站逆序），
+        ///      落盘顺序错了、「缺章补齐」按顺序插回也会跟着错。
+        ///   ③ 判重/补章对齐需要"同一章的不同写法"认成同一个。
+        ///
+        /// 表驱动：每条都写**期望值**（禁止 >= 之类模糊断言）。
+        /// </summary>
+        private static void TestChapterNumber()
+        {
+            // ① 阿拉伯数字（含全角、前后缀）
+            Eq("章号：第10章", 10, ParseNo("第10章 天黑别出门"));
+            Eq("章号：第１２３章（全角）", 123, ParseNo("第１２３章 全角数字"));
+            Eq("章号：第0章 判无效", 0, ParseNo("第0章"));
+            Eq("章号：第100001章 超上限判无效", 0, ParseNo("第100001章"));
+            Eq("章号：第99999999章 判无效", 0, ParseNo("第99999999章"));
+
+            // ② 中文小写
+            Eq("章号：第一章", 1, ParseNo("第一章 开始"));
+            Eq("章号：第九章", 9, ParseNo("第九章"));
+            Eq("章号：第十章", 10, ParseNo("第十章 转折"));
+            Eq("章号：第十二章", 12, ParseNo("第十二章"));
+            Eq("章号：第二十章", 20, ParseNo("第二十章"));
+            Eq("章号：第二十一章", 21, ParseNo("第二十一章"));
+            Eq("章号：第一百章", 100, ParseNo("第一百章"));
+            Eq("章号：第一百零三章", 103, ParseNo("第一百零三章"));
+            Eq("章号：第一百二十三章", 123, ParseNo("第一百二十三章"));
+            Eq("章号：第一千零一章", 1001, ParseNo("第一千零一章"));
+            Eq("章号：第一千二百三十四章", 1234, ParseNo("第一千二百三十四章"));
+            Eq("章号：两 == 2", 2, ParseNo("第二章"));
+
+            // ③ 中文大写
+            Eq("章号：第壹章", 1, ParseNo("第壹章"));
+            Eq("章号：第拾贰章", 12, ParseNo("第拾贰章"));
+            Eq("章号：第壹佰贰拾叁章", 123, ParseNo("第壹佰贰拾叁章"));
+
+            // ④ 全角/大写必须与半角/小写等价（这是"判重"的前提）
+            Eq("章号：第10章 == 第十章", ParseNo("第10章"), ParseNo("第十章"));
+            Eq("章号：第壹佰贰拾叁章 == 第123章", ParseNo("第壹佰贰拾叁章"), ParseNo("第123章"));
+
+            // ⑤ 没有章号的必须返回 false（否则会被错误排序）
+            Check("章号：楔子 无号", !TryNo("楔子"));
+            Check("章号：番外 无号", !TryNo("番外 那个夏天"));
+            Check("章号：序 无号", !TryNo("序"));
+            Check("章号：空串 无号", !TryNo(""));
+            Check("章号：null 无号", !TryNo(null));
+            Check("章号：第1章 != 第11章", ParseNo("第1章") != ParseNo("第11章"));
+
+            // ⑥ 缺号摘要（压缩成区间）
+            var nos = new System.Collections.Generic.List<int> { 12, 13, 14, 40, 88, 89 };
+            Eq("缺号：连续段压成区间", "12~14、40、88、89", ChapterNumber.DescribeRanges(nos));
+            Eq("缺号：两个连续只列两个", "5、6", ChapterNumber.DescribeRanges(new System.Collections.Generic.List<int> { 5, 6 }));
+            Eq("缺号：单个", "7", ChapterNumber.DescribeRanges(new System.Collections.Generic.List<int> { 7 }));
+            Eq("缺号：乱序输入也能压", "1~3", ChapterNumber.DescribeRanges(new System.Collections.Generic.List<int> { 3, 1, 2 }));
+            Eq("缺号：空列表", "", ChapterNumber.DescribeRanges(new System.Collections.Generic.List<int>()));
+
+            // ⑦ 目录顺序体检：正常不报，乱序要报
+            Check("顺序：正常递增不报警", RuleSite.DescribeOrderProblem(MakeChapters("第一章", "第二章", "第三章")) == null);
+            Check("顺序：带楔子也不误报",
+                RuleSite.DescribeOrderProblem(MakeChapters("楔子", "第一章", "第二章", "第三章")) == null);
+            Check("顺序：局部乱序要报警",
+                RuleSite.DescribeOrderProblem(MakeChapters("第一章", "第二章", "第五章", "第三章", "第四章")) != null);
+            Check("顺序：章节太少不判", RuleSite.DescribeOrderProblem(MakeChapters("第一章", "第二章")) == null);
+        }
+
+        private static int ParseNo(string title)
+        {
+            int n;
+            return ChapterNumber.TryParse(title, out n) ? n : 0;
+        }
+
+        private static bool TryNo(string title)
+        {
+            int n;
+            return ChapterNumber.TryParse(title, out n);
+        }
+
+        private static System.Collections.Generic.List<ChapterInfo> MakeChapters(params string[] titles)
+        {
+            var list = new System.Collections.Generic.List<ChapterInfo>();
+            int i = 0;
+            foreach (string t in titles)
+                list.Add(new ChapterInfo { Id = "id" + (i++), Title = t });
+            return list;
         }
 
         /// <summary>
