@@ -2818,6 +2818,98 @@ namespace TomatoBiquga
 
             // ---------- 自动选最优站点（同名 + 最全 + 最快）----------
             TestSitePicker();
+
+            // ---------- 导出纯文本（干净副本，不含内部标记）----------
+            TestPlainTextExport();
+        }
+
+        /// <summary>
+        /// 「导出纯文本」：另存一份**不带内部标记**的 txt。
+        ///
+        /// 为什么值得钉死：下载得到的那本 txt 里必须有 `#header-zone` 和 `&lt;!--c:id--&gt;`
+        /// （更新新章节/补齐缺章/续传全靠它们）。导出是给"阅读/传阅"用的，
+        /// 一旦把这些标记带出去，用户会以为文件坏了；反过来，万一清理逻辑
+        /// 手抖连正文一起删，损失更大 —— 所以两头都要断言。
+        /// </summary>
+        private static void TestPlainTextExport()
+        {
+            // ① 标题清洗
+            Eq("纯文本：去掉站点后缀", "第一章 开始",
+                PlainTextWriter.ChapterTitle(new ChapterInfo { Title = "第一章 开始_笔尖中文" }));
+            Eq("纯文本：连续空格压成一个", "第一章 开始",
+                PlainTextWriter.ChapterTitle(new ChapterInfo { Title = "第一章   开始  " }));
+
+            // ② 正文清洗：换行统一、行首尾去空白、连续空行压一行
+            string dirty = "第一行  \r\n\r\n\r\n第二行\t\n\n   第三行   ";
+            Eq("纯文本：正文清洗", "第一行\r\n\r\n第二行\r\n\r\n第三行", PlainTextWriter.CleanBody(dirty));
+            Eq("纯文本：空正文不炸", "", PlainTextWriter.CleanBody(null));
+            // ★ 端到端抓到的那个 bug：反解已下载 txt 时，锚点行会被并进上一章正文末尾。
+            //   这里钉住"整行标记必须丢掉"，否则干净副本里会漏出 <!--c:-->。
+            Eq("纯文本：正文里的锚点行被丢掉", "正文一\r\n\r\n正文二",
+                PlainTextWriter.CleanBody("正文一\r\n<!--c:12345-->\r\n\r\n正文二"));
+            Eq("纯文本：表头占位行被丢掉", "正文",
+                PlainTextWriter.CleanBody("#header-zone:2048\r\n正文"));
+            Eq("纯文本：进度标记行被丢掉", "正文",
+                PlainTextWriter.CleanBody("#progress-ok:1838:3619 正文"));
+            Check("纯文本：标记行判定", PlainTextWriter.IsMarkerLine("<!--c:1-->")
+                && PlainTextWriter.IsMarkerLine("#header-zone:2048")
+                && !PlainTextWriter.IsMarkerLine("<!-- 这是正文里的注释 -->"));
+
+            // ③ 真写一份，检查格式与"无内部标记"
+            string tmp = Path.Combine(Path.GetTempPath(), "nd_plain_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(tmp);
+                string outPath = Path.Combine(tmp, "书.纯文本.txt");
+                var book = new BookInfo { Title = "测试书", Author = "某人" };
+                var chapters = new List<ChapterInfo>
+                {
+                    new ChapterInfo { Id = "1", Order = 0, Title = "第一章 开始", Text = "第一章的正文内容。" },
+                    new ChapterInfo { Id = "2", Order = 1, Title = "第二章 继续", Text = "第二章的正文内容。" },
+                    new ChapterInfo { Id = "3", Order = 2, Title = "空章", Text = "" },          // 应被跳过
+                    new ChapterInfo { Id = "4", Order = 3, Title = "卷二", Text = "x", IsVolume = true }, // 卷标题也要跳过
+                };
+                int n = PlainTextWriter.Write(outPath, book, chapters, null);
+                Eq("纯文本：只写有正文的章（4 条里 2 条）", 2, n);
+                Check("纯文本：文件生成了", File.Exists(outPath));
+                string text = File.ReadAllText(outPath, Encoding.UTF8);
+                Eq("纯文本：第一行是书名", "测试书", text.Split('\n')[0].Trim());
+                Check("纯文本：有作者行", text.IndexOf("作者：某人", StringComparison.Ordinal) >= 0);
+                Check("纯文本：两个章节标题都在",
+                    text.IndexOf("第一章 开始", StringComparison.Ordinal) >= 0
+                    && text.IndexOf("第二章 继续", StringComparison.Ordinal) >= 0);
+                Check("纯文本：两段正文都在",
+                    text.IndexOf("第一章的正文内容。", StringComparison.Ordinal) >= 0
+                    && text.IndexOf("第二章的正文内容。", StringComparison.Ordinal) >= 0);
+                Check("纯文本：**没有**章节锚点", text.IndexOf("<!--c:", StringComparison.Ordinal) < 0);
+                Check("纯文本：**没有**表头占位", text.IndexOf("#header-zone", StringComparison.Ordinal) < 0);
+                Check("纯文本：**没有**进度标记", text.IndexOf("#progress", StringComparison.Ordinal) < 0);
+                Check("纯文本：空章不出现", text.IndexOf("空章", StringComparison.Ordinal) < 0);
+                Check("纯文本：卷条目不出现", text.IndexOf("卷二", StringComparison.Ordinal) < 0);
+                Check("纯文本：有 BOM（记事本不会乱码）",
+                    File.ReadAllBytes(outPath).Length > 3 && File.ReadAllBytes(outPath)[0] == 0xEF);
+            }
+            finally
+            {
+                try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { }
+            }
+
+            // ④ 全部章都空 → 要抛异常（调用方据此提示"先下载"），而不是写个空文件
+            try
+            {
+                string tmp2 = Path.Combine(Path.GetTempPath(), "nd_plain2_" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(tmp2);
+                bool threw = false;
+                try
+                {
+                    var onlyEmpty = new List<ChapterInfo> { new ChapterInfo { Id = "1", Title = "空", Text = "" } };
+                    PlainTextWriter.Write(Path.Combine(tmp2, "x.txt"), new BookInfo { Title = "t" }, onlyEmpty, null);
+                }
+                catch { threw = true; }
+                Check("纯文本：没有正文时抛异常（不写空文件）", threw);
+                Directory.Delete(tmp2, true);
+            }
+            catch { }
         }
 
         /// <summary>

@@ -47,7 +47,8 @@ namespace TomatoBiquga
         private FlowLayoutPanel _chapFlow2;  // 章节栏第二行按钮（导出类）
         private Button btnUpdate;           // 更新已下载的书（只补新章节）
         private Button btnExportEpub;       // 导出 EPUB
-        private Button btnExportMd;         // 导出 Markdown
+        private Button btnExportMd;
+        private Button btnExportTxt;         // 导出 Markdown
         private Button btnFillMissing;      // 补齐缺章
         private Button btnShelf;            // 本地书架（下载记录 + 一键追更）
         private Button btnQueue;            // 任务队列（一次下多本）
@@ -552,11 +553,12 @@ namespace TomatoBiquga
             new ToolTip().SetToolTip(btnExportEpub,
                 "把这本书已下载的正文导出成 EPUB（手机阅读器、Kindle 都能直接打开）。\n" +
                 "只导出已经下载到本地的章节，不会联网。");
-            btnExportMd = MakeButton("导出 Markdown", 96, (s, e) => DoExportMarkdown(), 2);
+            btnExportMd = MakeButton("导出 Markdown", 84, (s, e) => DoExportMarkdown(), 2);
             new ToolTip().SetToolTip(btnExportMd,
                 "把已下载的正文导出成 Markdown（带 YAML 头信息和目录锚点）：\n" +
                 "方便用 pandoc 转 EPUB/PDF，或者丢进笔记软件、静态站点生成器。");
-            btnOpenFolder = MakeButton("打开目录", 68, (s, e) => OpenFolder());
+            btnExportTxt = MakeButton("导出纯文本", 84, (s, e) => DoExportPlainText(), 2);
+            btnOpenFolder = MakeButton("打开目录", 60, (s, e) => OpenFolder());
             new ToolTip().SetToolTip(btnOpenFolder, "打开保存这本书的文件夹");
             // 错字检测放这一行而不是第一行：第一行在最小窗口（820px）已经排满，
             // 而这一行（导出类）内容才 260px 左右，有足够余量。
@@ -3188,6 +3190,76 @@ namespace TomatoBiquga
         }
 
         /// <summary>「导出 Markdown」：把已下载的正文导出成 md（带 YAML 头 + 目录锚点）。</summary>
+        /// <summary>
+        /// 「导出纯文本 TXT」：另存一份**不含内部标记**的干净小说文本。
+        ///
+        /// 为什么不直接给下载得到的那本：它的表头占位（#header-zone）和章节锚点
+        /// （&lt;!--c:id--&gt;）是"更新新章节 / 补齐缺章 / 续传"的必需品，删了就静默失效。
+        /// 而用户阅读时那些是噪音 —— 所以"另存一份"。
+        ///
+        /// 取数逻辑与 Markdown 导出一致（内存优先，没有就从已下载的 txt 反解），
+        /// 这样"能看到什么"和"导出的内容"永远对得上。
+        /// </summary>
+        private void DoExportPlainText()
+        {
+            if (_busy) { BusyNotice(Text); return; }
+            if (_currentBook == null) { MessageBox.Show("请先载入一本书的目录"); return; }
+
+            var book = _currentBook;
+            string root = txtOutput.Text.Trim();
+            if (root.Length == 0) root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载");
+            string bookDir, txtPath;
+            DownloadRunner.ResolvePaths(root, book.Title, book.Site, out bookDir, out txtPath);
+
+            var chapters = new List<ChapterInfo>();
+            foreach (var c in book.Chapters)
+            {
+                if (c == null || c.IsVolume) continue;
+                if (!string.IsNullOrEmpty(c.Text)) chapters.Add(c);
+            }
+            if (chapters.Count == 0)
+            {
+                if (!File.Exists(txtPath))
+                {
+                    MessageBox.Show("这本书还没有下载过，也没有可导出的正文。\n\n请先点「下载全部」。",
+                        "导出纯文本", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                chapters = ParseTxtIntoChapters(txtPath, book);
+                Log(string.Format("从 txt 解析出 {0} 章正文用于导出。", chapters.Count));
+            }
+            if (chapters.Count == 0)
+            {
+                MessageBox.Show("没能从文件里解析出正文（文件可能是空的）。", "导出纯文本",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            string outPath = Path.Combine(bookDir, Http.SafeFileName(book.Title) + ".纯文本.txt");
+            try
+            {
+                Cursor = Cursors.WaitCursor;
+                var exportChapters = ChaptersForExport(chapters);
+                int n = PlainTextWriter.Write(outPath, book, exportChapters, VolumeTitlesFor(book, exportChapters));
+                var size = new FileInfo(outPath).Length;
+                Log(string.Format("纯文本已生成：{0}（{1:N0} 字节，{2} 章，无内部标记）", outPath, size, n));
+                if (!SuppressDialogs)
+                    MessageBox.Show(string.Format(
+                        "纯文本导出完成！\n\n章节数：{0}\n文件大小：{1:N0} 字节\n\n文件位置：\n{2}\n\n" +
+                        "（这是一份干净副本：没有表头占位和章节锚点，可以直接丢进阅读器。\n" +
+                        "原 txt 没动 —— 更新新章节、补齐缺章还要靠它。）",
+                        n, size, outPath), "导出纯文本", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                Log("导出纯文本失败：" + ex.Message);
+                if (!SuppressDialogs)
+                    MessageBox.Show("导出失败：" + ex.Message, "导出纯文本",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            finally { Cursor = Cursors.Default; }
+        }
+
         private void DoExportMarkdown()
         {
             if (_busy) { BusyNotice(Text); return; }
