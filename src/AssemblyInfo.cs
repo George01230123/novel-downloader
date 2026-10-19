@@ -23,6 +23,27 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
+// 1.6.4：任务队列下载前先弹确认框（用户提出的功能）。
+//        · 需求：队列里输入书名后，弹窗告诉用户「书名 / 作者 / 一共几章」，
+//          问「是否下载这本」，点确认才开始下。
+//        · 为什么值得做：队列是"一次排好几本、睡前跑"的用法，而原来搜到就直接下 ——
+//          万一是同名/山寨/搜索错，用户第二天才发现，白下几百章。
+//          中间加一道确认，错误在下第一章之前就能拦住。
+//        · 实现要点：
+//          ① RunQueue 跑在后台线程，而 UiInvoke 是 BeginInvoke（异步）——
+//             必须等用户点完才能决定，所以新增 UiInvokeGet<T>（同步 Invoke）；
+//          ② 对话框 QueueConfirmDialog 三个出口：下载 / 跳过这本 / 停止队列；
+//             另加「本队列不再询问」—— 5 本书弹 5 次太烦；
+//          ③ 正文抽成纯函数 Summarize()，离线单测可直接断言内容，
+//             不用真的弹窗（弹窗在自动化里会卡住）；
+//          ④ 是否弹窗抽成纯函数 ShouldAskQueueConfirm(suppress, dontAskAgain)：
+//             自动化（SuppressDialogs）或勾过「不再询问」都不弹 —— 否则队列会卡死；
+//          ⑤ 弹窗构造失败时**按"下载"继续**（用户本意就是排队下），不把队列搞崩；
+//          ⑥ Esc = 跳过这本（不是停止），避免误按终止整个队列。
+//        · C# 5 注意：委托里不能用 out 参数（CS1628），所以 stopQueue 先落局部变量再赋值。
+//        · 加 16 条断言（正文含书名/作者/章数、部分下载说明、缺字段兜底、
+//          ShouldAsk 三态、对话框可构造且默认不停止）。
+//        · 用 DrawToBitmap 截图确认过布局：三按钮不重叠、文字没被切。
 // 1.6.3：超时不再白等 90 秒、不再弹"curl 退出码 28"、跨站扫描不再拖垮搜索。
 //        · 现象（用户发来截图）：搜「斗破苍穹」时弹出
 //            「请求失败（已重试 3 次）：https://www.biquga.com/search.html  curl 退出码 28」
@@ -295,6 +316,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.6.3.0")]
-[assembly: AssemblyFileVersion("1.6.3.0")]
-[assembly: AssemblyInformationalVersion("1.6.3")]
+[assembly: AssemblyVersion("1.6.4.0")]
+[assembly: AssemblyFileVersion("1.6.4.0")]
+[assembly: AssemblyInformationalVersion("1.6.4")]

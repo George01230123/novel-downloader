@@ -3217,6 +3217,30 @@ namespace TomatoBiquga
             });
         }
 
+        /// <summary>
+        /// 跨线程**同步**取一个返回值。
+        ///
+        /// 为什么需要：`UiInvoke` 是 BeginInvoke（异步），适合"刷界面"；
+        /// 但队列里要在下载前弹确认框——必须**等用户点完**再决定下不下，
+        /// 那就只能是同步的 Invoke。
+        /// 出任何异常都回退到 fallback，绝不把界面线程的问题变成队列崩溃。
+        /// </summary>
+        private T UiInvokeGet<T>(Func<T> f, T fallback)
+        {
+            if (f == null) return fallback;
+            try
+            {
+                if (IsDisposed) return fallback;
+                if (!InvokeRequired) return f();
+                return (T)Invoke(f);
+            }
+            catch (Exception ex)
+            {
+                try { Log("界面回调失败（已回退）：" + ex.GetType().Name + " / " + ex.Message); } catch { }
+                return fallback;
+            }
+        }
+
         private void UiInvoke(Action a)
         {
             if (IsDisposed) return;
@@ -4399,6 +4423,68 @@ namespace TomatoBiquga
                     .Replace("〈", "").Replace("〉", "").Replace(" ", "");
         }
 
+        /// <summary>
+        /// 队列里的"下载前确认"。返回 true = 可以下。
+        ///
+        /// 三种情况直接放行（不弹窗）：
+        ///   · SuppressDialogs（自动化自测）—— 测试里弹窗会直接把流程挂住
+        ///   · 用户在本队列里勾了「不再询问」
+        ///   · 窗口已经销毁（没法弹）
+        /// </summary>
+        private bool ConfirmQueueBook(BookInfo book, int totalChapters, int todoChapters,
+            bool willAppend, string bookDir, Action<string> log, out bool stopQueue)
+        {
+            stopQueue = false;
+            string title = book == null ? "" : book.Title;
+            string author = book == null ? "" : book.Author;
+            string site = SiteRegistry.LabelOf(book == null ? "" : book.Site);
+
+            if (!ShouldAskQueueConfirm(SuppressDialogs, _queueConfirmAll)) return true;
+
+            // ★ C# 5 不允许在委托里用 out 参数（CS1628），所以先落到局部变量再赋值
+            bool stop = false;
+            bool ok = UiInvokeGet<bool>(delegate
+            {
+                try
+                {
+                    using (var dlg = new QueueConfirmDialog(title, author, site,
+                        totalChapters, todoChapters, willAppend, bookDir))
+                    {
+                        var r = dlg.ShowDialog(this);
+                        if (dlg.DontAskAgain) _queueConfirmAll = true;
+                        stop = dlg.StopQueue;
+                        return r == DialogResult.Yes;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // 弹窗失败**不能**把队列搞崩：这里选择"放行"，因为用户的本意就是排队下载。
+                    try { Log("确认框打不开（已按「下载」继续）：" + ex.Message); } catch { }
+                    return true;
+                }
+            }, false);
+            stopQueue = stop;
+
+            if (log != null)
+            {
+                if (!ok && !stopQueue) log("  （确认框：跳过这本）");
+                else if (ok && _queueConfirmAll) log("  （确认框：已选择本队列不再询问）");
+            }
+            return ok;
+        }
+
+        /// <summary>
+        /// 队列确认要不要弹窗。**纯函数**，便于离线断言：
+        /// 自动化（SuppressDialogs）或用户勾了"不再询问"就不弹。
+        /// </summary>
+        internal static bool ShouldAskQueueConfirm(bool suppressDialogs, bool dontAskAgain)
+        {
+            return !suppressDialogs && !dontAskAgain;
+        }
+
+        /// <summary>队列里"本次运行内不再询问确认框"（用户勾过一次就记住，直到队列结束）</summary>
+        private bool _queueConfirmAll;
+
         private void RunQueue(System.Collections.Generic.List<string> keywords, Action<string> log, Func<bool> canceled)
         {
             int n = keywords.Count;
@@ -4488,6 +4574,24 @@ namespace TomatoBiquga
                     }
                     if (todo.Count == 0) todo.AddRange(book.Chapters);
 
+                    // 3.5) ★ 下载前先确认：把书名/作者/章节数摆给用户看，他点了才下。
+                    //      队列是"一次排好几本"的用法，原来搜到就直接下 ——
+                    //      万一是同名/山寨/搜索错，用户第二天才发现，白下几百章。
+                    int totalChapters = 0;
+                    foreach (var c in book.Chapters)
+                        if (c != null && !c.IsVolume && !string.IsNullOrEmpty(c.Id)) totalChapters++;
+                    bool stopQueue;
+                    if (!ConfirmQueueBook(book, totalChapters, todo.Count, append, bookDir, log, out stopQueue))
+                    {
+                        if (stopQueue)
+                        {
+                            log("  用户选择停止队列，后面的书不再处理。");
+                            break;
+                        }
+                        log("  用户跳过这本。");
+                        continue;
+                    }
+
                     // 4) 下载
                     var runner = new DownloadRunner
                     {
@@ -4531,6 +4635,97 @@ namespace TomatoBiquga
         public string SiteKey;
         public string SiteLabel;
         public BookInfo Book;
+    }
+
+    /// <summary>
+    /// 队列下载前的**确认框**：先把这本书是什么讲清楚（书名/作者/站点/多少章），
+    /// 再问"要不要下"。
+    ///
+    /// 为什么需要（用户提出）：队列是"一次排好几本、睡前跑"的用法，
+    /// 而原来的流程是"搜到就直接下" —— 万一名不对（同名/山寨/搜索错），
+    /// 用户第二天才发现下错了书，还白下了几百章。
+    /// 中间加一道确认，错误在下第一章之前就能拦住。
+    ///
+    /// 三个出口：
+    ///   · 下载        → 继续
+    ///   · 跳过这本    → 换下一本
+    ///   · 停止队列    → 整个队列停掉（后面都不做了）
+    /// 加一个「本队列不再询问」：5 本书弹 5 次太烦，勾上之后剩下的直接下。
+    /// </summary>
+    internal class QueueConfirmDialog : Form
+    {
+        /// <summary>用户选了"停止队列"</summary>
+        public bool StopQueue;
+        /// <summary>用户勾了"本队列不再询问"</summary>
+        public bool DontAskAgain;
+
+        private readonly CheckBox _chk;
+
+        public QueueConfirmDialog(string bookTitle, string author, string site, int totalChapters,
+            int todoChapters, bool willAppend, string bookDir)
+        {
+            Text = "确认下载这本？";
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            StartPosition = FormStartPosition.CenterParent;
+            MinimizeBox = false;
+            MaximizeBox = false;
+            ShowInTaskbar = false;
+            ClientSize = new Size(500, 250);
+            Font = UiFont.Mono(9.5F);
+
+            var body = new Label
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(14, 12, 14, 6),
+                Text = Summarize(bookTitle, author, site, totalChapters, todoChapters, willAppend, bookDir),
+            };
+
+            var chkBar = new Panel { Dock = DockStyle.Bottom, Height = 30, Padding = new Padding(14, 6, 14, 0) };
+            _chk = new CheckBox { Text = "本队列不再询问（后面的书直接开始下）", AutoSize = true, Dock = DockStyle.Left };
+            chkBar.Controls.Add(_chk);
+
+            var bar = new Panel { Dock = DockStyle.Bottom, Height = 44, Padding = new Padding(14, 6, 14, 8) };
+            var btnOk = new Button { Text = "下载", AutoSize = true, Dock = DockStyle.Right, DialogResult = DialogResult.Yes };
+            var btnSkip = new Button { Text = "跳过这本", AutoSize = true, Dock = DockStyle.Right, DialogResult = DialogResult.No };
+            var btnStop = new Button { Text = "停止队列", AutoSize = true, Dock = DockStyle.Right };
+            btnStop.Click += delegate { StopQueue = true; DialogResult = DialogResult.Cancel; Close(); };
+            bar.Controls.Add(btnOk);
+            bar.Controls.Add(btnSkip);
+            bar.Controls.Add(btnStop);
+
+            Controls.Add(body);
+            Controls.Add(chkBar);
+            Controls.Add(bar);
+
+            AcceptButton = btnOk;
+            CancelButton = btnSkip;     // Esc = 跳过这本（不是停止，别让误按 Esc 终止整个队列）
+
+            FormClosing += delegate { DontAskAgain = _chk != null && _chk.Checked; };
+        }
+
+        /// <summary>
+        /// 确认框正文。**抽成纯函数**：内容能被离线单测直接断言，
+        /// 不用真的弹窗（弹窗在自动化里会卡住）。
+        /// </summary>
+        internal static string Summarize(string bookTitle, string author, string site, int totalChapters,
+            int todoChapters, bool willAppend, string bookDir)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("《" + (string.IsNullOrEmpty(bookTitle) ? "(取不到书名)" : bookTitle) + "》");
+            sb.AppendLine();
+            sb.AppendLine("作者：" + (string.IsNullOrEmpty(author) ? "未知" : author));
+            if (!string.IsNullOrEmpty(site)) sb.AppendLine("站点：" + site);
+            sb.AppendLine("目录共 " + totalChapters + " 章");
+            if (todoChapters > 0 && todoChapters < totalChapters)
+                sb.AppendLine("本次要下 " + todoChapters + " 章（其余已下过，会自动跳过）");
+            else if (todoChapters > 0)
+                sb.AppendLine("本次要下 " + todoChapters + " 章");
+            if (willAppend) sb.AppendLine("已存在同名文件：新章节会接在原来的后面");
+            if (!string.IsNullOrEmpty(bookDir)) sb.AppendLine("保存到：" + bookDir);
+            sb.AppendLine();
+            sb.Append("要下载这本吗？");
+            return sb.ToString();
+        }
     }
 
     /// <summary>

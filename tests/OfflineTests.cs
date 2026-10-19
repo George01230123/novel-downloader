@@ -2664,6 +2664,51 @@ namespace TomatoBiquga
 
             // ---------- 网络失败要说人话，且超时不重试 ----------
             TestHttpErrorMessages();
+
+            // ---------- 队列下载前要确认（书名/作者/章数）----------
+            TestQueueConfirm();
+        }
+
+        /// <summary>
+        /// 队列下载前的确认框：内容必须把"这本书是什么"讲清楚，
+        /// 而且自动化 / 勾过"不再询问"时**不能**弹（否则队列会卡住）。
+        ///
+        /// 用户提出：队列是"一次排好几本、睡前跑"的用法，原来搜到就直接下 ——
+        /// 万一是同名/山寨/搜索错，第二天才发现，白下几百章。
+        /// </summary>
+        private static void TestQueueConfirm()
+        {
+            // ① 正文要包含书名 / 作者 / 章节数
+            string s = QueueConfirmDialog.Summarize("万相之王", "天蚕土豆", "笔尖中文", 1838, 1838, false, "/下载/万相之王");
+            Check("队列确认：带书名", s.IndexOf("万相之王", StringComparison.Ordinal) >= 0);
+            Check("队列确认：带书名号", s.IndexOf("《万相之王》", StringComparison.Ordinal) >= 0);
+            Check("队列确认：带作者", s.IndexOf("天蚕土豆", StringComparison.Ordinal) >= 0);
+            Check("队列确认：带站点", s.IndexOf("笔尖中文", StringComparison.Ordinal) >= 0);
+            Check("队列确认：带目录章数", s.IndexOf("1838", StringComparison.Ordinal) >= 0);
+            Check("队列确认：问句结尾", s.IndexOf("要下载这本吗", StringComparison.Ordinal) >= 0);
+
+            // ② 只下一部分时要说清"本次要下 N 章"
+            string partial = QueueConfirmDialog.Summarize("书", "作者", "站", 100, 30, true, "/d");
+            Check("队列确认：部分下载说明本次章数", partial.IndexOf("本次要下 30 章", StringComparison.Ordinal) >= 0);
+            Check("队列确认：追加时说明会接在后面", partial.IndexOf("接在原来的后面", StringComparison.Ordinal) >= 0);
+
+            // ③ 作者/书名缺失也要能显示（不能出现空白的"作者："）
+            string missing = QueueConfirmDialog.Summarize("", "", "", 10, 10, false, "");
+            Check("队列确认：书名缺失有兜底", missing.IndexOf("取不到书名", StringComparison.Ordinal) >= 0);
+            Check("队列确认：作者缺失显示未知", missing.IndexOf("作者：未知", StringComparison.Ordinal) >= 0);
+
+            // ④ 自动化 / 勾过"不再询问" → 不弹窗（这是队列不卡死的关键）
+            Check("队列确认：自动化时不该弹窗", !MainForm.ShouldAskQueueConfirm(true, false));
+            Check("队列确认：勾过不再询问就不弹", !MainForm.ShouldAskQueueConfirm(false, true));
+            Check("队列确认：两个都没勾才弹", MainForm.ShouldAskQueueConfirm(false, false));
+
+            // ⑤ 弹窗本身能构造出来（不 ShowDialog，否则测试会挂住）
+            using (var dlg = new QueueConfirmDialog("测试书", "测试作者", "测试站", 12, 12, false, "/tmp"))
+            {
+                Check("队列确认：对话框能构造", dlg != null);
+                Check("队列确认：默认不停止队列", !dlg.StopQueue);
+                Check("队列确认：默认不记住选择", !dlg.DontAskAgain);
+            }
         }
 
         /// <summary>
