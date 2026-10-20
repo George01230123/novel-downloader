@@ -2821,6 +2821,67 @@ namespace TomatoBiquga
 
             // ---------- 导出纯文本（干净副本，不含内部标记）----------
             TestPlainTextExport();
+
+            // ---------- 进度显示（百分比 / 状态行 / 标题）----------
+            TestProgressText();
+        }
+
+        /// <summary>
+        /// 进度显示：百分比、状态行、窗口标题。
+        ///
+        /// ★ 为什么抽成纯函数再断言：这几行字原来是拼在界面回调里的，
+        ///   边界（0 章、总数为 0、done 超过 total、时长跨小时）根本没法测。
+        ///   而进度算错的后果很具体：用户看到 0% 不动、或者 120%、或者 "预计还需 -3 秒"。
+        /// </summary>
+        private static void TestProgressText()
+        {
+            // ① 百分比与边界
+            Eq("进度：0/0 是 0%", 0, ProgressText.Percent(0, 0));
+            Eq("进度：0/100 是 0%", 0, ProgressText.Percent(0, 100));
+            Eq("进度：50/100 是 50%", 50, ProgressText.Percent(50, 100));
+            Eq("进度：44.5% 进位到 45%", 45, ProgressText.Percent(445, 1000));
+            Eq("进度：满额是 100%", 100, ProgressText.Percent(100, 100));
+            Eq("进度：done 超过 total 夹到 100%", 100, ProgressText.Percent(120, 100));
+            Eq("进度：负数当成 0", 0, ProgressText.Percent(-5, 100));
+
+            // ② 下载状态行
+            string line = ProgressText.DownloadLine(812, 1838, TimeSpan.FromSeconds(123), 5.2, 12);
+            Check("进度行：带 done/total 和百分比",
+                line.IndexOf("812/1838（44%）", StringComparison.Ordinal) >= 0);
+            Check("进度行：带速率", line.IndexOf("章/秒", StringComparison.Ordinal) >= 0);
+            Check("进度行：带预计剩余", line.IndexOf("预计还需", StringComparison.Ordinal) >= 0);
+            Check("进度行：带并发数", line.IndexOf("并发 12", StringComparison.Ordinal) >= 0);
+            Check("进度行：已完成时说 100% 且不再给剩余时间",
+                ProgressText.DownloadLine(1838, 1838, TimeSpan.FromSeconds(44), 0, 12)
+                    .IndexOf("100%", StringComparison.Ordinal) >= 0
+                && ProgressText.DownloadLine(1838, 1838, TimeSpan.FromSeconds(44), 0, 12)
+                    .IndexOf("预计还需", StringComparison.Ordinal) < 0);
+            Eq("进度行：还没开始时的文案", "开始下载 0/1838 章…",
+                ProgressText.DownloadLine(0, 1838, TimeSpan.Zero, 0, 12));
+            Eq("进度行：总数为 0 不崩", "下载中…", ProgressText.DownloadLine(0, 0, TimeSpan.Zero, 0, 1));
+
+            // ③ 无总数阶段
+            Check("进度行：阶段文案带省略号",
+                ProgressText.PhaseLine("载入目录").IndexOf("载入目录…", StringComparison.Ordinal) >= 0);
+            Check("进度行：阶段可带细节",
+                ProgressText.PhaseLine("载入目录", "已读 3 页").IndexOf("已读 3 页", StringComparison.Ordinal) >= 0);
+
+            // ④ 标题
+            string t1 = ProgressText.Title("小说下载器 v1.7.6", "下载", 812, 1838);
+            Check("标题：带阶段+计数+百分比",
+                t1.IndexOf("下载", StringComparison.Ordinal) >= 0
+                && t1.IndexOf("812/1838", StringComparison.Ordinal) >= 0
+                && t1.IndexOf("44%", StringComparison.Ordinal) >= 0);
+            Eq("标题：没有阶段时原样", "小说下载器 v1.7.6",
+                ProgressText.Title("小说下载器 v1.7.6", null, 0, 0));
+            Check("标题：无总数时只说在做什么",
+                ProgressText.Title("标题", "载入目录", 0, 0).IndexOf("载入目录…", StringComparison.Ordinal) >= 0);
+
+            // ⑤ 时长格式化
+            Eq("时长：45 秒", "45秒", ProgressText.Fmt(TimeSpan.FromSeconds(45)));
+            Eq("时长：2 分 24 秒", "2分24秒", ProgressText.Fmt(TimeSpan.FromSeconds(144)));
+            Eq("时长：1 小时 02 分", "1小时02分", ProgressText.Fmt(TimeSpan.FromSeconds(3725)));
+            Eq("时长：负数当 0", "0秒", ProgressText.Fmt(TimeSpan.FromSeconds(-5)));
         }
 
         /// <summary>

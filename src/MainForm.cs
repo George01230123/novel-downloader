@@ -137,7 +137,7 @@ namespace TomatoBiquga
             // 标题避开第三方商标：产品名用 ASCII 的 novel-downloader（= 仓库名），中文名只作说明。
             // ★ 版本号从程序集读，不写死在字符串里 —— 之前这里硬编码 "v1.0.5"，
             //   发到 1.2.0 之后标题还显示 1.0.5（用户看截图会以为装的是旧版）。
-            Text = "小说下载器 v" + UpdateChecker.CurrentVersionText + "（免安装单文件版）";
+            Text = _defaultTitle = "小说下载器 v" + UpdateChecker.CurrentVersionText + "（免安装单文件版）";
             Width = 1000;
             Height = 720;
             StartPosition = FormStartPosition.CenterScreen;
@@ -1260,7 +1260,7 @@ namespace TomatoBiquga
             SetBooksBarText("按地址直连：" + bookUrl + "（正在载入目录）");
             var site2 = s;
             var book2 = book;
-            RunBackground("载入目录中…", () => DoLoadBookCore(book2, site2));
+            RunBackgroundMarquee("载入目录中…", () => DoLoadBookCore(book2, site2));
             return true;
         }
 
@@ -1285,7 +1285,7 @@ namespace TomatoBiquga
             // 本次搜索实际用的站点 Key —— 缓存要按站点分开存，否则切站后会
             // 直接返回上一个站点的结果（拿到错的书籍地址去请求另一个站）。
             string searchSiteKey = SiteKeyOf(site);
-            RunBackground("搜索中…", () =>
+            RunBackgroundMarquee("搜索中…", () =>
             {
                 // ① 先查本地缓存：搜过的词直接秒回，不再打站点
                 //    （缓存带站点维度：同词不同站是两条记录）
@@ -1777,7 +1777,7 @@ namespace TomatoBiquga
                     if (list.Count == 0) { MessageBox.Show("请先输入番茄 book_id 或分享链接"); return; }
                     var s = _site;
                     SetRefresh(s, forceRefresh);
-                    RunBackground("载入目录中…", () => DoLoadBookCore(list[0], s));
+                    RunBackgroundMarquee("载入目录中…", () => DoLoadBookCore(list[0], s));
                     return;
                 }
                 MessageBox.Show("请先在列表里选一本书");
@@ -1801,7 +1801,7 @@ namespace TomatoBiquga
                 site = _site;       // EnsureSiteUsable 可能切了站点，重新取一次
             }
             SetRefresh(site, forceRefresh);
-            RunBackground("载入目录中…", () => DoLoadBookCore(book, site));
+            RunBackgroundMarquee("载入目录中…", () => DoLoadBookCore(book, site));
         }
 
         /// <summary>把“强制刷新 / 离线模式 / 续爬”标志透传给站点实现</summary>
@@ -2083,7 +2083,7 @@ namespace TomatoBiquga
         {
             if (_busy) { BusyNotice("检查更新"); return; }
             if (!SuppressDialogs) btnCheckUpdate.Enabled = false;
-            RunBackground("正在检查更新…", () =>
+            RunBackgroundMarquee("正在检查更新…", () =>
             {
                 var r = UpdateChecker.Check(Log);
                 UiInvoke(() =>
@@ -2307,6 +2307,9 @@ namespace TomatoBiquga
         /// 由「刷新目录」按钮在用户选择"继续上次遍历"时设置，用完立刻清掉。
         /// </summary>
         private string _resumeBookDir;
+        /// <summary>窗口标题原文（进度会临时改标题，结束时必须还原）</summary>
+        private string _defaultTitle = "";
+
         private DateTime _dlStart;
 
         /// <summary>
@@ -2513,7 +2516,7 @@ namespace TomatoBiquga
 
             var core = new TomatoCore { ExePath = TomatoCore.GuessDefaultExePath() };
             var bid = bookId;
-            RunBackground("调用官方工具下载中…", () => RunOfficialDownload(core, bid, title));
+            RunBackgroundMarquee("调用官方工具下载中…", () => RunOfficialDownload(core, bid, title));
         }
 
         private void RunOfficialDownload(TomatoCore core, string bookId, string knownTitle)
@@ -2758,29 +2761,19 @@ namespace TomatoBiquga
                             var used = DateTime.Now - _dlStart;
 
                             // 实时速率：最近 DlRateWindow 章的滑动窗口
+                            // （ETA 由 ProgressText 用**全程均值**算，更稳，不会因刚下几章快慢乱跳）
                             _dlRecent.Enqueue(DateTime.Now);
                             while (_dlRecent.Count > DlRateWindow) _dlRecent.Dequeue();
-                            string rate = "";
+                            double perSec = 0;
                             if (_dlRecent.Count >= 3)
                             {
                                 var span = (DateTime.Now - _dlRecent.Peek()).TotalSeconds;
-                                if (span > 0.5)
-                                {
-                                    double perSec = (_dlRecent.Count - 1) / span;
-                                    rate = string.Format("，当前 {0:F2} 章/秒", perSec);
-                                }
+                                if (span > 0.5) perSec = (_dlRecent.Count - 1) / span;
                             }
-
-                            // ETA 仍用全程均值：它更稳，不会因为刚下的几章快慢而乱跳
-                            string eta = "";
-                            if (done > 0 && done < total)
-                            {
-                                var per = used.TotalSeconds / done;
-                                var left = TimeSpan.FromSeconds(per * (total - done));
-                                eta = string.Format("，预计还需 {0}", Fmt(left));
-                            }
-                            lblStatus.Text = string.Format("下载中 {0}/{1} 章　已用 {2}{3}{4}　（并发 {5}）",
-                                done, total, Fmt(used), rate, eta, _dlWorkersShown);
+                            lblStatus.Text = ProgressText.DownloadLine(done, total, used, perSec, _dlWorkersShown);
+                            // ★ 同时写进标题栏：状态栏在窗口最底部，日志区一拉大就看不见了，
+                            //   用户会以为"没有进度条"。标题永远在最上面。
+                            Text = ProgressText.Title(_defaultTitle, "下载", done, total);
                         });
                 },
             };
@@ -2790,6 +2783,7 @@ namespace TomatoBiquga
             {
                 lblStatus.Text = string.Format("下载结束：成功 {0}，跳过 {1}，失败 {2}",
                     runner.Ok, runner.Skipped, runner.Failed);
+                Text = _defaultTitle;      // 还原标题，别把「下载 100%」留在上面
             });
             Log("=== 下载结束 ===");
             Log(string.Format("成功 {0} 章，跳过 {1} 章（站点公告/空内容），失败 {2} 章",
@@ -3124,7 +3118,7 @@ namespace TomatoBiquga
             }
 
             var site = _site;
-            RunBackground("检查缺章…", () =>
+            RunBackgroundMarquee("检查缺章…", () =>
             {
                 var runner = new DownloadRunner
                 {
@@ -3488,11 +3482,42 @@ namespace TomatoBiquga
                         if (btnOfficial != null) btnOfficial.Enabled = cboSite.SelectedIndex == 0;
                         UpdateSelLabel();
                         btnCancel.Enabled = false;
+                        // 收尾：进度条回到"确定值"模式并清空，标题还原，
+                        // 否则上一次的「下载 100%」会一直挂在标题上。
+                        progress.Style = ProgressBarStyle.Blocks;
+                        progress.Value = 0;
+                        Text = _defaultTitle;
                     });
                 }
             });
             t.IsBackground = true;
             t.Start();
+        }
+
+        /// <summary>
+        /// 没有确切总数的阶段专用：走马灯 + 标题显示"在做什么"。
+        ///
+        /// 适用：载入目录（站点翻几页事先不知道）、搜索、检查更新、检测站点、
+        /// 实测站点速度、错字检测、调用官方工具。
+        /// 不适用：下载 / 更新新章节 / 补章 —— 它们有确切的 done/total，
+        /// 走 Value 才是真进度；设成 Marquee 会变成来回滚动的动画，把真实进度盖掉。
+        /// </summary>
+        private void RunBackgroundMarquee(string status, Action work)
+        {
+            progress.Style = ProgressBarStyle.Marquee;
+            progress.MarqueeAnimationSpeed = 30;
+            Text = ProgressText.Title(_defaultTitle, PhaseNameOf(status), 0, 0);
+            RunBackground(status, work);
+        }
+
+        /// <summary>把"载入目录中…"这类状态串归一成标题里用的短词（去掉省略号和"中"）</summary>
+        private static string PhaseNameOf(string status)
+        {
+            if (string.IsNullOrEmpty(status)) return null;
+            string s = status.Trim();
+            s = s.Replace("…", "").Replace("...", "").Trim();
+            if (s.EndsWith("中", StringComparison.Ordinal)) s = s.Substring(0, s.Length - 1);
+            return s.Trim();
         }
 
         private void Log(string msg)
@@ -3636,7 +3661,7 @@ namespace TomatoBiquga
             _probing = true;
             Log("正在检测各站点是否可用（各发 1 个请求）…");
 
-            RunBackground("检测站点可用性…", () =>
+            RunBackgroundMarquee("检测站点可用性…", () =>
             {
                 var result = new Dictionary<int, string>();
                 // 站点列表来自注册表，不再手写数组 —— 加站点不用改这里
@@ -3881,7 +3906,7 @@ namespace TomatoBiquga
 
             _rating = true;
             Log("正在实测各站点速度（每站 3 个请求：搜索 / 目录 / 一章正文）…");
-            RunBackground("实测站点速度…", () =>
+            RunBackgroundMarquee("实测站点速度…", () =>
             {
                 List<SiteScore> scores = null;
                 try { scores = SiteRater.MeasureAll(Log); }
@@ -4494,7 +4519,7 @@ namespace TomatoBiquga
             Log(string.Format("开始错字检测：用「{0}」重新抓 {1} 章与本地正文逐字比对…",
                 otherName, limit));
 
-            RunBackground("错字检测中…", () =>
+            RunBackgroundMarquee("错字检测中…", () =>
             {
                 var result = new TypoFinder.Result
                 {
