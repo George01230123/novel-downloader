@@ -45,6 +45,31 @@ namespace TomatoBiquga
         public string SearchReferer;
 
         /// <summary>
+        /// 搜索表单用哪种编码提交，空/`utf-8` = 默认；`gbk` / `gb18030` = 老站。
+        ///
+        /// ★ 为什么需要（飘天文学实测）：那站是 GBK 站，搜索词必须按 **GBK 字节**百分号编码。
+        ///   我们通常发 UTF-8 —— 实测结果：UTF-8 提交返回 200 但 **0 命中**，
+        ///   换成 GBK（`%CD%F2%CF%E0...`）立刻命中。这不是"站点坏了"，是编码不对。
+        ///
+        /// 实现上只影响**表单体的字节**：编码后的百分号串是纯 ASCII，
+        /// 所以传输层（curl / .NET）完全不用改。
+        /// </summary>
+        public string SearchFormEncoding;
+
+        /// <summary>
+        /// 目录地址**从详情页里提取**（捕获组 1 = 目录页地址，可相对可绝对）。
+        ///
+        /// ★ 为什么需要（飘天文学）：它的目录地址藏在详情页的「查看全部章节」链接里
+        ///   （`https://www.piaotia.com/html/13/13191/index.html`），
+        ///   而现有 <see cref="TocUrlTemplate"/> 的 `%i` 只会取**路径里第一个数字**——
+        ///   对 `/html/13/13191/` 会取到 `13`（分类号）而不是 `13191`（书号），
+        ///   拼出来的地址是错的，而且**不会报错**（只是目录 0 章）。
+        ///
+        /// 设置了这个字段时，它优先于 <see cref="TocUrlTemplate"/>。
+        /// </summary>
+        public string TocUrlFromDetailPattern;
+
+        /// <summary>
         /// 从搜索结果页抽"书籍详情页链接"的正则，按序尝试，第一个有命中的胜出。
         /// 捕获组 1 = 链接。
         /// </summary>
@@ -265,6 +290,7 @@ namespace TomatoBiquga
             MustCompileIfSet(ContentStripPattern, "ContentStripPattern");
             MustCompileIfSet(ContentNextPagePattern, "ContentNextPagePattern");
             MustCompileIfSet(ContentBase64Pattern, "ContentBase64Pattern");
+            MustCompileIfSet(TocUrlFromDetailPattern, "TocUrlFromDetailPattern");
             if (TocMaxPages < 1) TocMaxPages = 1;
             // 目录分页：给了页码模板就必须能编出地址，否则是配置写错
             if (!string.IsNullOrEmpty(TocPageUrlTemplate)

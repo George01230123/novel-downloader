@@ -128,12 +128,34 @@ namespace TomatoBiquga
                 string title = null;
                 try { title = BookTitleFromSearch(html, link); } catch { }
                 if (string.IsNullOrEmpty(title)) title = "（载入后取书名）";
+                // ★ 兜底：有些站的搜索结果是**详情页本身**（飘天文学：命中一本就直接给书页），
+                //   页面上没有"结果行"，行内取不到书名 —— 用整页的 BookTitlePattern 再试一次。
+                //   否则结果列表显示"（载入后取书名）"，用户不知道搜到的是不是自己要的那本。
+                if (string.IsNullOrEmpty(title) || title == "（载入后取书名）")
+                {
+                    try
+                    {
+                        var ttm = Regex.Match(html, _r.BookTitlePattern, RegexOptions.IgnoreCase);
+                        if (ttm.Success && ttm.Groups.Count >= 2) title = ttm.Groups[1].Value.Trim();
+                    }
+                    catch { }
+                }
 
                 // ★ 从**这一行**里把作者/字数/状态抠出来。
                 //   以前这里只留了书名，作者永远空 —— 用户抱怨"连是谁写的都看不到"，
                 //   而站点其实给了（见 SiteRule.SearchAuthorColumn 的注释）。
                 var row = CellsOfResultRow(html, link);
                 string author = PickCell(row, _r.SearchAuthorColumn);
+                // 同上：详情页当结果页的站，行里没有作者 → 用整页规则兜底
+                if (string.IsNullOrEmpty(author) && !string.IsNullOrEmpty(_r.BookAuthorPattern))
+                {
+                    try
+                    {
+                        var am = Regex.Match(html, _r.BookAuthorPattern, RegexOptions.IgnoreCase);
+                        if (am.Success && am.Groups.Count >= 2) author = CleanAuthor(am.Groups[1].Value);
+                    }
+                    catch { }
+                }
                 string desc = BuildDesc(row, _r.SearchDescColumns);
 
                 result.Add(new BookInfo
@@ -223,7 +245,43 @@ namespace TomatoBiquga
                 string v = f[1] == null ? "" : f[1];
                 if (v.IndexOf("%s", StringComparison.Ordinal) >= 0)
                     v = v.Replace("%s", keyword);
-                sb.Append(Uri.EscapeDataString(v));
+                sb.Append(EscapeFormValue(v));
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// 按规则里的 <see cref="SiteRule.SearchFormEncoding"/> 对表单值做百分号编码。
+        ///
+        /// ★ 为什么不能一律用 <see cref="Uri.EscapeDataString"/>：
+        ///   它固定按 UTF-8 编码。而老站（飘天文学实测）是 GBK 站 ——
+        ///   发 UTF-8 过去，服务端按 GBK 解出来是乱码，结果是"200 但 0 条结果"，
+        ///   看起来像站点没这本书，其实只是编码不对。
+        ///   这里改成：先按目标编码转成字节，再逐字节 `%XX`。
+        ///   产出仍然是**纯 ASCII**，所以传输层（curl / .NET）完全不用改。
+        /// </summary>
+        internal string EscapeFormValue(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return "";
+            if (string.IsNullOrEmpty(_r.SearchFormEncoding)
+                || _r.SearchFormEncoding.StartsWith("utf", StringComparison.OrdinalIgnoreCase))
+                return Uri.EscapeDataString(value);
+
+            System.Text.Encoding enc;
+            try { enc = System.Text.Encoding.GetEncoding(_r.SearchFormEncoding); }
+            catch { return Uri.EscapeDataString(value); }   // 编码名写错 → 退回 UTF-8，不炸
+
+            byte[] bytes = enc.GetBytes(value);
+            var sb = new StringBuilder(bytes.Length * 3);
+            foreach (byte b in bytes)
+            {
+                char c = (char)b;
+                // 只保留 RFC 3986 的 unreserved 字符，其余一律转义
+                bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                          || (c >= '0' && c <= '9')
+                          || c == '-' || c == '_' || c == '.' || c == '~';
+                if (plain) sb.Append(c);
+                else sb.Append('%').Append(b.ToString("X2"));
             }
             return sb.ToString();
         }
@@ -309,7 +367,41 @@ namespace TomatoBiquga
 
             // 目录页：多数站点详情页就是目录页；少数要另取一个地址
             string tocUrl = item.Url;
-            if (!string.IsNullOrEmpty(_r.TocUrlTemplate))
+
+            // ★ 优先：从详情页里**正则提取**目录地址（见 SiteRule.TocUrlFromDetailPattern）。
+            //   为什么需要：飘天文学的目录在 /html/13/13191/index.html，
+            //   而 `%i` 只取路径第一个数字（会取到 13 这个分类号，拼出来是错地址，
+            //   而且不报错、只是目录 0 章）。
+            if (!string.IsNullOrEmpty(_r.TocUrlFromDetailPattern))
+            {
+                try
+                {
+                    var tm = Regex.Match(html, _r.TocUrlFromDetailPattern, RegexOptions.IgnoreCase);
+                    if (tm.Success && tm.Groups.Count >= 2 && tm.Groups[1].Value.Length > 0)
+                    {
+                        string found = Absolutize(Http.HtmlDecode(tm.Groups[1].Value).Trim(), item.Url);
+                        if (!string.IsNullOrEmpty(found)
+                            && !string.Equals(found, item.Url, StringComparison.OrdinalIgnoreCase))
+                        {
+                            tocUrl = found;
+                            if (log != null) log("读取目录页（从详情页提取）：" + tocUrl);
+                            string tocHtml = Http.Get(tocUrl, item.Url);
+                            if (!string.IsNullOrEmpty(tocHtml)) html = tocHtml;
+                        }
+                    }
+                    else if (log != null)
+                    {
+                        // 不是错误：有些站的书页本身就是目录（飘天文学实测 1851 章就是从这里解析的），
+                        // 只有"本该有目录链接却没有"才值得改成"注意"。这里降级成一行提示。
+                        log("（详情页没有单独的目录链接，按详情页本身解析）");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (log != null) log("从详情页提取目录地址失败：" + ex.Message);
+                }
+            }
+            else if (!string.IsNullOrEmpty(_r.TocUrlTemplate))
             {
                 string path = PathOf(item.Url);
                 tocUrl = ExpandTemplate(_r.TocUrlTemplate, path);

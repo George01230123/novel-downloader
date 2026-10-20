@@ -23,7 +23,31 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
-// 1.7.8：把**代理**接上（以前 Http.Proxy 是死代码）+ 借此找到一个新源的入口。
+// 1.7.9：新增第 4 个书源「飘天文学」+ 慢章分段计时。
+//        · 飘天是上一版接代理后发现的：直连 403，走 proxy= 才通。
+//          实测（走 127.0.0.1:7897）：搜索 1.9~4.1 秒 1 条（万相之王/天蚕土豆）、
+//          目录 **1851 章**（笔尖中文是 1838，它多了第 1851 章番外）、
+//          正文 0.7~0.8 秒 / 3638 字符 / 197 行 / **无导航残留**。
+//        · 为它加了两个**通用**能力（不是给这一个站写死）：
+//          ① `SiteRule.SearchFormEncoding`：搜索表单按 GBK 提交。
+//             实测 UTF-8 提交是"200 但 0 命中"，GBK 才是 `%CD%F2%CF%E0%D6%AE%CD%F5`。
+//             实现上只改表单值的编码（产出仍是纯 ASCII），传输层一行没动。
+//          ② `SiteRule.TocUrlFromDetailPattern`：目录地址从详情页**正则提取**。
+//             飘天的目录在 /html/13/13191/index.html，而 `%i` 只会取路径第一个数字
+//             （取到 13 这个分类号），拼出来是错地址且**不报错**（只是目录 0 章）。
+//        · 顺手修了"搜索结果没有书名"：有些站的搜索结果是**详情页本身**（飘天就是），
+//          没有"结果行"可取书名/作者 → 加整页 BookTitlePattern/BookAuthorPattern 兜底。
+//          修之前列表显示"（载入后取书名）"，用户不知道搜到的是不是那本。
+//        · 慢章分段计时：curl 的 -w 现在带回 `DNS|连接|TLS|首字节|总`，
+//          单章超 2 秒就记一行 `慢章：<url> —— DNS 0 / 连接 0 / TLS 528 / 首字节 1208 / 总 1209 ms`。
+//          以前只能报"有时候特别慢"，用户无法描述、我只能手工 curl 复盘（这次就是这么查的）。
+//          实测：biquge365 TLS 528ms / 首字节 1208ms；飘天 TLS 459ms / 首字节 2215ms。
+//        · 一处已有断言拦住了我：`TestKeywordGuardSwitch` 要求所有规则
+//          **不开** SearchResultMustContainKeyword（笔尖中文的误杀教训）。
+//          飘天本来开了，被这条断言拦下 → 关掉，并在注释里写明"不需要它"：
+//          它的 BookLinkPatterns 要求 `title="点击阅读"`，只出现在真书页上。
+//        · 加 44 条断言：新源已注册/规则可校验/GBK 与 UTF-8 编码确实不同/ASCII 不变/
+//          分段解析（正常/老格式/垃圾/null）/状态码仍取第一段/描述文本含各阶段。// 1.7.8：把**代理**接上（以前 Http.Proxy 是死代码）+ 借此找到一个新源的入口。
 //        · 起因：用户问"还有什么改的"，我查代码发现 `Http.Proxy` 字段**存在**、
 //          curl 的 `-x` 和 .NET 的 `WebProxy` 两条后端**都支持**，
 //          但**没有任何地方能设置它**（没有 ini 键、没有界面）—— 等于死代码。
@@ -636,6 +660,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.7.8.0")]
-[assembly: AssemblyFileVersion("1.7.8.0")]
-[assembly: AssemblyInformationalVersion("1.7.8")]
+[assembly: AssemblyVersion("1.7.9.0")]
+[assembly: AssemblyFileVersion("1.7.9.0")]
+[assembly: AssemblyInformationalVersion("1.7.9")]

@@ -70,6 +70,67 @@ namespace TomatoBiquga
         /// <summary>最近一次 curl 实际执行的参数（诊断用；不含 URL 里的敏感查询串不处理）</summary>
         public static string LastCurlArgs;
 
+        /// <summary>上一次请求的分段耗时（毫秒）。慢的时候用来说清"慢在哪一段"。</summary>
+        public static double LastDnsMs, LastConnectMs, LastTlsMs, LastFirstByteMs, LastTotalMs;
+
+        /// <summary>
+        /// 慢请求回调（总耗时超过 <see cref="SlowRequestThresholdMs"/> 时调用一次）。
+        ///
+        /// 为什么要这个钩子：Http 这一层没有日志器，而"哪一章慢、慢在哪"必须进日志
+        /// 才可能被用户看到。由下载器（或探针）挂一个 Action 上来即可，不挂就什么都不做。
+        /// </summary>
+        public static Action<string> SlowRequestLogger;
+
+        /// <summary>超过这个毫秒数才算"慢"（默认 2 秒；实测正常 0.3~0.9 秒）</summary>
+        public static int SlowRequestThresholdMs = 2000;
+
+        /// <summary>
+        /// 把 curl 的 `-w` 输出拆成阶段耗时。
+        /// 格式：`<状态码>|<dns>|<connect>|<appconnect>|<starttransfer>|<total>`
+        /// （老 curl 不认这些变量，会原样吐字面量 —— 这时全部按 0 处理，不报错。）
+        /// </summary>
+        internal static void ParsePhases(string stdout)
+        {
+            LastDnsMs = LastConnectMs = LastTlsMs = LastFirstByteMs = LastTotalMs = 0;
+            try
+            {
+                if (string.IsNullOrEmpty(stdout)) return;
+                string s = stdout.Trim();
+                string[] parts = s.Split('|');
+                if (parts.Length < 6) return;
+                double dns, conn, tls, first, total;
+                if (!double.TryParse(parts[1], System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out dns)) return;
+                if (!double.TryParse(parts[2], System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out conn)) return;
+                if (!double.TryParse(parts[3], System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out tls)) return;
+                if (!double.TryParse(parts[4], System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out first)) return;
+                if (!double.TryParse(parts[5], System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out total)) return;
+                LastDnsMs = dns * 1000; LastConnectMs = conn * 1000; LastTlsMs = tls * 1000;
+                LastFirstByteMs = first * 1000; LastTotalMs = total * 1000;
+            }
+            catch { }
+        }
+
+        /// <summary>`-w` 输出里"状态码"那一段（`|` 之前）。老格式没有 `|` 就返回整串。</summary>
+        internal static string PhasesCodePart(string stdout)
+        {
+            if (string.IsNullOrEmpty(stdout)) return "";
+            int bar = stdout.IndexOf('|');
+            return bar > 0 ? stdout.Substring(0, bar) : stdout;
+        }
+
+        /// <summary>人话版的阶段耗时，用于日志</summary>
+        public static string DescribePhases()
+        {
+            if (LastTotalMs <= 0) return "";
+            return string.Format("DNS {0:F0} / 连接 {1:F0} / TLS {2:F0} / 首字节 {3:F0} / 总 {4:F0} ms",
+                LastDnsMs, LastConnectMs, LastTlsMs, LastFirstByteMs, LastTotalMs);
+        }
+
         private static readonly Random Rnd = new Random();
 
         /// <summary>
@@ -968,7 +1029,10 @@ namespace TomatoBiquga
                 //   `>` 会被当成 curl 的参数 → curl 退出码 3（URL 格式错误），
                 //   所有请求全部失败。这个错犯过一次，被联网实测抓出来（见 docs）。
                 LastCurlArgs = args.ToString();
-                args.Append(" -w \"%{http_code}\"");
+                // ★ 顺带把**分段计时**也带回来：慢的时候能说清慢在 DNS / 连接 / TLS /
+                //   首字节 / 传输哪一段，而不是只报一个总数。用 `|` 分隔，状态码仍在最前面，
+                //   所以 ParseHttpCode 的"取最后一段数字"逻辑不受影响（见下面的拆分）。
+                args.Append(" -w \"%{http_code}|%{time_namelookup}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{time_total}\"");
                 args.Append(" \"").Append(url).Append('"');
 
                 var psi = new ProcessStartInfo(CurlPath, args.ToString())
@@ -993,7 +1057,17 @@ namespace TomatoBiquga
                 }
 
                 if (!File.Exists(tmp)) throw new Exception("curl 没有产生输出文件");
-                LastStatusCode = ParseHttpCode(stdout);
+                ParsePhases(stdout);            // 先拆阶段计时（同时把状态码算出来）
+                LastStatusCode = ParseHttpCode(PhasesCodePart(stdout));
+
+                // ★ 慢请求：主动记一行"慢在哪一段"。
+                //   没有这一行，用户只能说"有时候很慢"，我只能靠手工 curl 复盘（这次就是这么查的）。
+                //   回调由上层挂（下载器挂到界面日志），Http 自己不依赖 UI。
+                if (LastTotalMs >= SlowRequestThresholdMs && SlowRequestLogger != null)
+                {
+                    try { SlowRequestLogger(Shorten(url) + " —— " + DescribePhases()); }
+                    catch { }
+                }
                 // 读响应头里的 Retry-After（读不到就保持 0）
                 try
                 {

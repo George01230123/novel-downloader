@@ -63,6 +63,7 @@ namespace TomatoBiquga
             list.Add(Xbiquwk());
             list.Add(Biquge365());
             list.Add(Pmzw());
+            list.Add(Piaotia());
             _all = list;
             return _all;
         }
@@ -241,6 +242,79 @@ namespace TomatoBiquga
         ///   · TocPageUrlTemplate / TocMaxPages：目录切成 index_N.html，一页 100 章，
         ///     只读第一页**不会报错**，用户会以为这本书只有 100 章。
         /// </summary>
+        /// <summary>
+        /// 飘天文学（ptwxz.com / piaotia.com）—— 2026-10-20 实测通过（**需要代理**）。
+        ///
+        /// 为什么加它：现有 3 个站里笔尖中文最稳但《万相之王》1838 章，
+        /// 而飘天有**第 1851 章番外**（更全）。它直连 403，走 `proxy=` 才通 ——
+        /// 正好用上刚接进来的代理配置。
+        ///
+        /// 实测（走 127.0.0.1:7897）：
+        ///   · 搜索：POST /modules/article/search.php，字段 searchtype=articlename & searchkey；
+        ///     **必须 GBK 编码**（UTF-8 提交 200 但 0 命中）；命中后返回的是**详情页**
+        ///     （不是结果列表），里面有「查看全部章节」指向 html/13/13191/index.html。
+        ///   · 目录页 30KB，章节链接是**相对路径**（`9042777.html`），
+        ///     以目录页为 base 解析正好。
+        ///   · 正文页：正文是**裸文本**（没有 id="content" 这种容器），
+        ///     紧跟在一个 `</table><br>` 之后，到该 div 结束；用 `<br>` 分段
+        ///     （Http.StripTags 会把 `<br>` 转成换行）。
+        /// </summary>
+        private static SiteRule Piaotia()
+        {
+            return new SiteRule
+            {
+                Key = "piaotia",
+                DisplayName = "飘天文学",
+                Base = "https://www.piaotia.com/",
+                Caps = SiteCapabilities.Search | SiteCapabilities.AddressIntake
+                     | SiteCapabilities.TocInDetailPage,
+
+                SearchUrl = "https://www.piaotia.com/modules/article/search.php",
+                SearchIsPost = true,
+                SearchForm = new[]
+                {
+                    new[] { "searchtype", "articlename" },
+                    new[] { "searchkey", "%s" },
+                },
+                // ★ 这站是 GBK；发 UTF-8 会"200 但 0 命中"（实测）
+                SearchFormEncoding = "gbk",
+                SearchReferer = "https://www.piaotia.com/",
+                SearchIsResultPattern = "飘天文学",
+                // ★ 不开关键词校验（沿用笔尖中文的教训：站点不回显关键词时会误杀整页结果）。
+                //   这里不需要它：BookLinkPatterns 要求 `title="点击阅读"`，
+                //   而这个属性只出现在**真正的书页**上，侧栏推荐里没有 —— 已经足够精确。
+                SearchResultMustContainKeyword = false,
+                // 详情页的「点击阅读」是**绝对地址**；列表页则是 /bookinfo/N/M.html
+                BookLinkPatterns = new[]
+                {
+                    "<a[^>]*title=\"点击阅读[^\"]*\"[^>]*href=\"(https?://[^\"]+/html/\\d+/\\d+/)\"",
+                    "<a[^>]*href=\"(https?://[^\"]+/html/\\d+/\\d+/)\"[^>]*title=\"点击阅读",
+                    "href=\"(/bookinfo/\\d+/\\d+\\.html)\"",
+                },
+
+                // <title>万相之王最新章节,天蚕土豆作品选-飘天文学</title>
+                BookTitlePattern = "<title>([^,<]*?)(?:最新章节)?[,<]",
+                // 页面上是「作&nbsp;&nbsp;&nbsp; 者：天蚕土豆」
+                BookAuthorPattern = "者[：:]\\s*(?:&nbsp;)*([^<&\\s]{1,20})",
+                BookIntroPattern = "<meta name=\"description\" content=\"([^\"]*)\"",
+
+                // ★ 目录地址在详情页里（%i 会取错，取到分类号 13）
+                TocUrlFromDetailPattern = "href=\"(https?://[^\"]+/html/\\d+/\\d+/index\\.html)\"",
+                // 目录页里是相对链接：<a href="9042777.html">第1章 …</a>
+                TocLinkPattern = "<a[^>]*href=\"(\\d+\\.html)\"[^>]*>([^<]{0,120})</a>",
+                TocLinksAreAbsolute = false,
+                TocIsDescending = false,
+
+                // 正文是裸文本，锚定在字号按钮表格之后
+                ContentPattern = "</table>\\s*<br>\\s*([\\s\\S]*?)</div>",
+                ContentIsBase64 = false,
+                // 站点水印/导航整行（正文里不该出现，防串味）
+                ContentStripPattern = "(?im)^\\s*(PT文学|书籍介绍|章节目录|我的书架|加入书架|加入书签|推薦本書|推荐本书|收藏本书|繁體中文|上一章|返回目录|下一章|返回书页)\\s*$\\s*",
+
+                KnownTitles = new[] { "万相之王" },
+            };
+        }
+
         private static SiteRule Pmzw()
         {
             return new SiteRule

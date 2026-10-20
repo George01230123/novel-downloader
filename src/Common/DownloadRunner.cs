@@ -172,6 +172,11 @@ namespace TomatoBiquga
             //   成对调用；即使这里之后抛异常，Run 跑在后台线程上，线程结束时系统也会自动清掉这个标记。
             AppPower.KeepAwakeBegin();
 
+            // ★ 慢请求归因：单章超过 2 秒就记一行 DNS/连接/TLS/首字节。
+            //   以前只报"总数"，用户只能描述成"有时候特别慢"，而真相可能是
+            //   TLS 握手（https 站 0.3~0.6s）或站点自身首字节慢。
+            Http.SlowRequestLogger = delegate (string s) { Log("  慢章：" + s); };
+
             var root = string.IsNullOrEmpty(RootDir)
                 ? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载")
                 : RootDir;

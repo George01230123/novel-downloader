@@ -2830,6 +2830,87 @@ namespace TomatoBiquga
 
             // ---------- 代理配置（以前 Http.Proxy 存在但没人能设置 = 死代码）----------
             TestProxySetting();
+
+            // ---------- 新源「飘天文学」+ 为它加的两个通用能力 ----------
+            TestPiaotiaAndFormEncoding();
+
+            // ---------- 慢章分段计时（DNS/连接/TLS/首字节）----------
+            TestPhaseTiming();
+        }
+
+        /// <summary>
+        /// 飘天文学（piaotia）+ 两个新能力：
+        ///   ① 搜索表单按 GBK 提交（UTF-8 会"200 但 0 命中"）；
+        ///   ② 目录地址从详情页正则提取（`%i` 会取到分类号 13 而不是书号 13191）。
+        /// </summary>
+        private static void TestPiaotiaAndFormEncoding()
+        {
+            var d = SiteRegistry.ByKey("piaotia");
+            Check("飘天：已注册", d != null);
+            var rule = SiteRules.ByKey("piaotia");
+            Check("飘天：规则存在", rule != null);
+            if (rule == null) return;
+
+            Check("飘天：显示名", rule.DisplayName == "飘天文学");
+            Check("飘天：支持搜索", (rule.Caps & SiteCapabilities.Search) != 0);
+            Check("飘天：支持贴地址", (rule.Caps & SiteCapabilities.AddressIntake) != 0);
+            Eq("飘天：搜索表单用 GBK", "gbk", rule.SearchFormEncoding);
+            Check("飘天：目录地址从详情页提取",
+                !string.IsNullOrEmpty(rule.TocUrlFromDetailPattern));
+            Check("飘天：正文用表格锚点",
+                rule.ContentPattern != null && rule.ContentPattern.IndexOf("</table>", StringComparison.Ordinal) >= 0);
+            try { rule.Validate(); Check("飘天：规则校验通过", true); }
+            catch (Exception ex) { Check("飘天：规则校验通过（失败：" + ex.Message + "）", false); }
+
+            // ① GBK 编码：万相之王 → %CD%F2%CF%E0%D6%AE%CD%F5（实测站点要的就是这个）
+            var site = new RuleSite(rule);
+            Eq("表单编码：GBK 百分号串", "%CD%F2%CF%E0%D6%AE%CD%F5", site.EscapeFormValue("万相之王"));
+            // 同样的字按 UTF-8 编码是完全不同的串 —— 这就是"0 命中"的原因
+            Check("表单编码：GBK 与 UTF-8 确实不同",
+                site.EscapeFormValue("万相之王") != Uri.EscapeDataString("万相之王"));
+            // 纯 ASCII 值不受影响（两种编码下一样）
+            Eq("表单编码：ASCII 值不变", "articlename", site.EscapeFormValue("articlename"));
+
+            // ② 默认（没有指定编码）仍走 UTF-8
+            var utf8Rule = new SiteRule { Key = "t", DisplayName = "t", Base = "https://x/",
+                SearchUrl = "https://x/s", BookLinkPatterns = new[] { "(/a/)" }, TocLinkPattern = "(/c/)",
+                ContentPattern = "(c)", SearchForm = new[] { new[] { "s", "%s" } } };
+            var utf8Site = new RuleSite(utf8Rule);
+            Eq("表单编码：没指定就用 UTF-8", Uri.EscapeDataString("万相之王"), utf8Site.EscapeFormValue("万相之王"));
+        }
+
+        /// <summary>
+        /// 慢章分段计时：把 curl 的 `-w` 输出拆成 DNS/连接/TLS/首字节/总。
+        ///
+        /// ★ 为什么钉住：慢的时候这是唯一的证据来源。解析写错不会报错，
+        /// 只会让日志里出现"DNS 0 / 连接 0 / TLS 0"这种看着正常其实没用的行 ——
+        /// 而用户恰恰是在"很慢"的时候需要它。
+        /// </summary>
+        private static void TestPhaseTiming()
+        {
+            // ① 正常格式（秒 → 毫秒）
+            Http.ParsePhases("200|0.010|0.180|0.000|0.350|0.355");
+            Eq("分段：DNS", 10.0, Math.Round(Http.LastDnsMs, 3));
+            Eq("分段：连接", 180.0, Math.Round(Http.LastConnectMs, 3));
+            Eq("分段：TLS", 0.0, Math.Round(Http.LastTlsMs, 3));
+            Eq("分段：首字节", 350.0, Math.Round(Http.LastFirstByteMs, 3));
+            Eq("分段：总", 355.0, Math.Round(Http.LastTotalMs, 3));
+            Eq("分段：状态码取第一段", "200", Http.PhasesCodePart("200|0.010|0.180|0.000|0.350|0.355"));
+            Check("分段：描述文本包含各阶段",
+                Http.DescribePhases().IndexOf("TLS", StringComparison.Ordinal) >= 0
+                && Http.DescribePhases().IndexOf("首字节", StringComparison.Ordinal) >= 0);
+
+            // ② 老格式（只有状态码）：不能崩，且全部归零
+            Http.ParsePhases("404");
+            Eq("分段：老格式总耗时为 0", 0.0, Http.LastTotalMs);
+            Eq("分段：老格式仍能取状态码", "404", Http.PhasesCodePart("404"));
+            Eq("分段：没数据时描述为空", "", Http.DescribePhases());
+
+            // ③ 垃圾输入：不抛异常
+            Http.ParsePhases("abc|||");
+            Eq("分段：垃圾输入不崩", 0.0, Http.LastTotalMs);
+            Http.ParsePhases(null);
+            Eq("分段：null 不崩", 0.0, Http.LastTotalMs);
         }
 
         /// <summary>
