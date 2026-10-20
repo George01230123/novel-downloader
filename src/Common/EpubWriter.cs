@@ -238,9 +238,9 @@ namespace TomatoBiquga
                         }
                     }
                 }
-                catch (Exception ex) { try { File.WriteAllBytes(zipPath, b); } catch { } }
+                catch (Exception) { try { File.WriteAllBytes(zipPath, b); } catch { } }
             }
-            catch (Exception ex3) { }
+            catch (Exception) { }
         }
 
         /// <summary>把文件恢复成原始字节（改动不可信时的回滚路径）</summary>

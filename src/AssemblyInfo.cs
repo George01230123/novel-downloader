@@ -23,7 +23,14 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
-// 1.7.11：封档前的体检 —— 修一个真缺陷、删死代码、砍重复包体。
+// 1.7.12：封档前清零编译告警。
+//        · CI 路径（dotnet build build\NovelDownloader.csproj）原本有 3 个告警，
+//          全是"变量赋了没用"：DiagnosticsExporter 的 `char sep`、
+//          EpubWriter 两个 `catch (Exception ex/ex3)` 里没用到的异常变量。
+//        · 三个都是无害的，但封档版本不该带着告警出门 —— 以后谁看到黄字都会犹豫
+//          "这是不是有意的"。现在 CI 路径 **0 告警**。
+//        · 行为完全不变（只是去掉未使用的局部变量/把 catch 变量省掉），
+//          五项门禁与发布包内 --selftest 全部重跑通过。// 1.7.11：封档前的体检 —— 修一个真缺陷、删死代码、砍重复包体。
 //        · 【真缺陷】下载抛异常时**不清理**：我 1.7.7 把 `AppPower.KeepAwakeEnd()` 写在
 //          Run 的最后一行，中途抛异常就跳过它 → KeepAwake 计数永远不归零 →
 //          这个进程从此**永久阻止系统睡眠**（用户合盖也不睡，而且完全不知道是我干的）。
@@ -701,6 +708,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.7.11.0")]
-[assembly: AssemblyFileVersion("1.7.11.0")]
-[assembly: AssemblyInformationalVersion("1.7.11")]
+[assembly: AssemblyVersion("1.7.12.0")]
+[assembly: AssemblyFileVersion("1.7.12.0")]
+[assembly: AssemblyInformationalVersion("1.7.12")]

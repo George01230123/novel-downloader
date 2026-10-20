@@ -46,9 +46,8 @@ namespace TomatoBiquga
             int eq = line.IndexOf('=');
             int co = line.IndexOf(':');
             int at = -1;
-            char sep = '\0';
-            if (eq >= 0 && (co < 0 || eq < co)) { at = eq; sep = '='; }
-            else if (co >= 0) { at = co; sep = ':'; }
+            if (eq >= 0 && (co < 0 || eq < co)) at = eq;
+            else if (co >= 0) at = co;
             if (at < 0) return line;
 
             string key = line.Substring(0, at).Trim();
