@@ -168,6 +168,9 @@ namespace TomatoBiquga
         {
             if (Site == null || Book == null || Chapters == null) throw new Exception("下载器没有初始化");
             if (Chapters.Count == 0) throw new Exception("没有选中任何章节");
+            // ★ 下载期间**别让系统睡着**：用户挂一夜，机器进睡眠 = 网络断 = "下载停了"。
+            //   成对调用；即使这里之后抛异常，Run 跑在后台线程上，线程结束时系统也会自动清掉这个标记。
+            AppPower.KeepAwakeBegin();
 
             var root = string.IsNullOrEmpty(RootDir)
                 ? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载")
@@ -317,6 +320,8 @@ namespace TomatoBiquga
             if (FromCacheCount > 0)
                 Log(string.Format("其中 {0}/{1} 章直接复用了目录遍历时已抓到的正文（未重复请求站点）", FromCacheCount, Ok));
             Log(string.Format("本次下载：成功 {0} 章，跳过 {1} 章（其中已下载过 {3} 章），失败 {2} 章", Ok, Skipped, Failed, SkippedDownloaded));
+            // 下载结束：恢复系统默认电源行为（必须在最后，且与上面的 Begin 成对）
+            AppPower.KeepAwakeEnd();
         }
 
         /// <summary>文件里"有正文"的章节数（统计和进度标记用；没有锚点时返回 0）</summary>

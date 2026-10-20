@@ -134,6 +134,20 @@ namespace TomatoBiquga
             //   测试套件会在 new 之前把 SuppressByDefault 置 true（见 OfflineTests.Run）。
             SuppressDialogs = SuppressByDefault;
 
+            // ★ 关掉 Windows 的 Power Throttling（EcoQoS）：后台运行时系统会把本进程降频，
+            //   下载同时在做解压/清洗/写盘，体感就是"放后台就变慢"。
+            //   失败静默（Win7 没这个 API、受限权限也可能失败）—— 绝不因此影响启动。
+            try
+            {
+                if (!AppPower.DisablePowerThrottling())
+                {
+                    // 只在真有原因时记一句，别刷屏
+                    if (!string.IsNullOrEmpty(AppPower.LastError))
+                        System.Diagnostics.Debug.WriteLine("PowerThrottling: " + AppPower.LastError);
+                }
+            }
+            catch { }
+
             // 标题避开第三方商标：产品名用 ASCII 的 novel-downloader（= 仓库名），中文名只作说明。
             // ★ 版本号从程序集读，不写死在字符串里 —— 之前这里硬编码 "v1.0.5"，
             //   发到 1.2.0 之后标题还显示 1.0.5（用户看截图会以为装的是旧版）。

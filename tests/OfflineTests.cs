@@ -2824,6 +2824,52 @@ namespace TomatoBiquga
 
             // ---------- 进度显示（百分比 / 状态行 / 标题）----------
             TestProgressText();
+
+            // ---------- 后台不减速：电源相关调用必须安全、可嵌套、可降级 ----------
+            TestAppPower();
+        }
+
+        /// <summary>
+        /// 后台下载相关：Power Throttling 关闭 + 阻止系统睡眠。
+        ///
+        /// ★ 为什么只测"逻辑安全"而不测"真的变快"：
+        ///   · 这两个都是**系统级**调用，效果取决于机器（实测关掉 EcoQoS 只提升约 4%），
+        ///     断言"变快"会是假测试；
+        ///   · 但**调用写错会真出事**：Begin/End 不配对 → 系统被长期禁止睡眠（等于改了用户的电源策略）；
+        ///     老系统没有 API → 如果抛异常就会让程序起不来。
+        ///   所以这里钉的是：可嵌套、成对、幂等、任何失败都不抛。
+        /// </summary>
+        private static void TestAppPower()
+        {
+            AppPower.ResetForTest();
+            Check("电源：初始不在保持唤醒状态", !AppPower.IsKeepingAwake);
+            Eq("电源：初始计数 0", 0, AppPower.AwakeDepthForTest);
+
+            // ① 可嵌套
+            AppPower.KeepAwakeBegin();
+            Eq("电源：Begin 后计数 1", 1, AppPower.AwakeDepthForTest);
+            Check("电源：Begin 后在保持唤醒", AppPower.IsKeepingAwake);
+            AppPower.KeepAwakeBegin();
+            Eq("电源：再 Begin 计数 2（嵌套）", 2, AppPower.AwakeDepthForTest);
+            AppPower.KeepAwakeEnd();
+            Eq("电源：End 一次回到 1", 1, AppPower.AwakeDepthForTest);
+            Check("电源：还处于保持唤醒", AppPower.IsKeepingAwake);
+            AppPower.KeepAwakeEnd();
+            Eq("电源：End 两次回到 0", 0, AppPower.AwakeDepthForTest);
+            Check("电源：已恢复（不再阻止睡眠）", !AppPower.IsKeepingAwake);
+
+            // ② 多余的 End 不能把计数弄成负数（那会让"恢复"永远不触发）
+            AppPower.KeepAwakeEnd();
+            Eq("电源：多余的 End 计数不会变负", 0, AppPower.AwakeDepthForTest);
+
+            // ③ 关节流是幂等的，且失败也不抛
+            bool a = AppPower.DisablePowerThrottling();
+            bool b = AppPower.DisablePowerThrottling();
+            Eq("电源：关节流可重复调用且结果一致", a, b);
+            Check("电源：关节流没有抛异常", true);
+
+            AppPower.ResetForTest();
+            Eq("电源：Reset 后计数 0", 0, AppPower.AwakeDepthForTest);
         }
 
         /// <summary>

@@ -589,6 +589,26 @@ namespace TomatoBiquga
                     }
                     if (attempt < MaxRetries - 1) SleepBackoff(attempt, ex is ThrottledException);
 
+                    // ★ 限流**最多等一次就放弃**（不再连睡 3 轮）。
+                    //
+                    //   以前"限流也重试 3 次"：2 秒 + 4 秒 + 8 秒（限流起点就是 2 秒，
+                    //   有 Retry-After 时更长，上限 20 秒）—— 一章最坏睡 14~40 秒。
+                    //   而批量抓取一次 32 章，一批撞上限流就把整批拖成几分钟。
+                    //   用户看到的就是"**有时候突然特别慢**"（实测计时也印证：
+                    //   https 站单章 0.65~0.9 秒里有 0.3~0.6 秒是 TLS 握手，
+                    //   再加上限流退避，慢得莫名其妙）。
+                    //
+                    //   为什么"快放弃"更好：
+                    //     · 站点限流时原地重试正是它想惩罚的行为（这条早就写在 SleepBackoff 注释里）；
+                    //     · 降并发已经由 AdaptiveWorkers 负责（限流计数会让后续批次变窄）；
+                    //     · 这一章进"缺失章节报告"，用户点「补齐缺章」就能补回来 ——
+                    //       比让整批慢 10 倍划算得多。
+                    if (ex is ThrottledException)
+                    {
+                        last = ex;
+                        break;
+                    }
+
                     // ★ 超时不重试：重试一个已经超时的站点 = 再等一个超时。
                     //   30 秒 × 3 次 = 90 秒白等（用户看到的就是"卡住然后弹窗"）。
                     if (ex is TimeoutLikeException)

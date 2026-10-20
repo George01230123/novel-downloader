@@ -23,7 +23,35 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
-// 1.7.6：进度显示补齐 —— 百分比 + 窗口标题 + 载入目录的走马灯。
+// 1.7.7：查"有时候特别慢" + 后台不减速（用户谷时任务）。
+//        · 任务一（找新书源）：**实测 27 个候选站，没有一个比现有 3 个更好，所以没加。**
+//          结果分三类：
+//            · 劫持/停放页：b520.cc（有分类词但一个链接都没有，搜索全 404）、
+//              qb5200.com（变成博彩站 LOYAL303）、bqg128.com / 168kanshu.com（JS 跳转停放页）；
+//            · 403（Cloudflare）：69shuba、shubaow、ptwxz、txt520；
+//            · 能通但不可用：ddxs.la（顶点小说）搜索/分类可用，但**单章 4.4 秒**，
+//              且章节分页 `_1.html` 连续两次 000（连不上），加了会**静默截断正文**；
+//              biquges.com（蚂蚁文学）目录 2973 章一页 1.5 秒很快，但**正文不在 HTML 里**
+//              （解出来只有一行"最新网址…"广告）。
+//          结论：与其硬塞一个更慢/会截断的源，不如如实报告。
+//        · 任务二（慢下载）：用 curl 分段计时（DNS/连接/TLS/首字节/传输）定位到两件事：
+//          ① **TLS 握手占一半以上**（笔尖中文 http 无 TLS：单章 330~375ms；
+//             笔趣阁365 https：TLS 317~399ms、总 660~800ms；排名中文网：TLS 391~581ms、
+//             总 710~890ms）。批量抓取（一个 curl 进程连抓 32 章、复用连接）就是为这个存在的。
+//          ② **限流退避把 worker 睡死**：原来限流也重试 3 次，2+4+8 秒（有 Retry-After 更长，
+//             上限 20 秒），一章最坏睡 14~40 秒；批量一次 32 章，一批撞上就整批几分钟 ——
+//             这正是"有时候突然特别慢"。改成**限流最多等一次就放弃**：
+//             降并发交给 AdaptiveWorkers，这一章进缺失报告，用户点「补齐缺章」补回来。
+//        · 任务三（后台变慢/停止）：加 AppPower.cs，两条系统调用 + 对照实测：
+//          ① `SetProcessInformation(ProcessPowerThrottling)` 关掉 EcoQoS 执行速度节流；
+//          ② 下载期间 `SetThreadExecutionState(ES_CONTINUOUS|ES_SYSTEM_REQUIRED)` 阻止系统睡眠
+//             （这是"放后台就停"的真正原因 —— 挂着下载没人动键鼠，机器睡了，网络就断）。
+//          对照实测（120 章，交替两轮）：不关节流 55.8 / 54.8 ms/章；
+//          关节流 53.4 / 53.0 ms/章 —— **只有约 4%**。如实写进说明，不吹成"解决"。
+//          两个调用都做**静默降级**（Win7 没 API、权限受限也不能让程序起不来），
+//          KeepAwake 用计数支持嵌套、成对调用，最终恢复 ES_CONTINUOUS。
+//        · 加 13 条断言：电源调用可嵌套（1→2→1→0）、多余 End 不会变负、
+//          关节流幂等且不抛、Reset 生效 —— 钉的是"调用安全"，**不是**"真的变快"。// 1.7.6：进度显示补齐 —— 百分比 + 窗口标题 + 载入目录的走马灯。
 //        · 起因：用户说"加一个进度条显示出下载的进度"。
 //          但进度条**本来就有**（ProgressBar + OnProgress(done,total)），
 //          只是它只有"812/1838 章"，没有百分比，而且只写在**最底部状态栏** ——
@@ -587,6 +615,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.7.6.0")]
-[assembly: AssemblyFileVersion("1.7.6.0")]
-[assembly: AssemblyInformationalVersion("1.7.6")]
+[assembly: AssemblyVersion("1.7.7.0")]
+[assembly: AssemblyFileVersion("1.7.7.0")]
+[assembly: AssemblyInformationalVersion("1.7.7")]
