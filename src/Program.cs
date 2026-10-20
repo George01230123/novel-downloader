@@ -163,6 +163,13 @@ namespace TomatoBiquga
                 {
                     Http.ReplayStrict = true;
                 }
+                  // --proxy http://127.0.0.1:7897：命令行覆盖 settings.ini 里的 proxy（给探针/CI 用）
+                  else if (string.Equals(a, "--proxy", StringComparison.OrdinalIgnoreCase) ||
+                           string.Equals(a, "-proxy", StringComparison.OrdinalIgnoreCase))
+                  {
+                      string p = i + 1 < args.Length ? (args[i + 1] == null ? "" : args[i + 1].Trim()) : "";
+                      if (p.Length > 0) { Http.Proxy = p; i++; }
+                  }
             }
         }
 

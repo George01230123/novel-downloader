@@ -1864,6 +1864,17 @@ namespace TomatoBiquga
         {
             Http.Configure(_settings.MinDelayMs, _settings.MaxDelayMs);
 
+            // ★ 代理：settings.ini 里写了 proxy= 就全局生效（空 = 直连）。
+            //   实测意义：27 个小说站里 19 个连不上/403 —— 挂代理可能就能多几个源。
+            //   只在值变化时记一行日志，免得每次 ApplySettings 都刷屏。
+            string wantProxy = _settings.Proxy == null ? "" : _settings.Proxy.Trim();
+            if (!string.Equals(Http.Proxy, wantProxy, StringComparison.Ordinal))
+            {
+                Http.Proxy = wantProxy;
+                if (wantProxy.Length > 0) Log("已启用代理：" + wantProxy);
+                else Log("代理已关闭（直连）。");
+            }
+
             // 繁简开关：从设置回填到界面（设置对话框/ini 改过之后要同步勾选状态）
             if (chkTraditional != null && chkTraditional.Checked != _settings.OutputTraditional)
                 chkTraditional.Checked = _settings.OutputTraditional;

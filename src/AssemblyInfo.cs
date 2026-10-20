@@ -23,7 +23,28 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
-// 1.7.7：查"有时候特别慢" + 后台不减速（用户谷时任务）。
+// 1.7.8：把**代理**接上（以前 Http.Proxy 是死代码）+ 借此找到一个新源的入口。
+//        · 起因：用户问"还有什么改的"，我查代码发现 `Http.Proxy` 字段**存在**、
+//          curl 的 `-x` 和 .NET 的 `WebProxy` 两条后端**都支持**，
+//          但**没有任何地方能设置它**（没有 ini 键、没有界面）—— 等于死代码。
+//          而实测数据说明这很关键：27 个小说站里 **19 个连不上或 403**。
+//        · 接法（三处 + 一个安全项）：
+//          ① `AppSettings.Proxy` + `settings.ini` 的 `proxy=` 键（可手改）；
+//          ② `ApplySettings` 里同步到 `Http.Proxy`（只在变化时记一行日志，不刷屏）；
+//          ③ 命令行 `--proxy http://127.0.0.1:7897`（给探针/CI 用，不动用户配置）；
+//          ④ **诊断包把 proxy 也打码** —— 代理串常带 `user:pass@`，漏出去就是泄漏。
+//        · 实测（走 127.0.0.1:7897）：
+//          19 个原先连不上的站里，只有 **飘天文学 ptwxz.com / piaotia.com** 活了
+//          （直连 403 → 代理 200、搜索返回《万相之王》、书页里给出
+//          `html/13/13191/index.html`，且**章数比笔尖中文多**：有第 1851 章番外）。
+//          其余仍 403/000（Cloudflare 拦的是 IP 声誉，代理不解决）。
+//        · 飘天**还没接进来**，因为它需要两个引擎能力（本次没做，避免赶工出错）：
+//          ① 搜索表单是 **GBK 编码**（我们只会发 UTF-8，实测 0 命中、GBK 命中）；
+//          ② 目录地址要从**详情页里正则提取**（`html/13/13191/index.html`），
+//             现有 `%i` 只会取路径里第一个数字（会取到 13 而不是 13191）。
+//          这两条都是通用能力，后续可做。
+//        · 加 5 条断言：settings.ini 存 Proxy= 并读回一致、空值读回空串、
+//          诊断包把带密码的代理串打码。// 1.7.7：查"有时候特别慢" + 后台不减速（用户谷时任务）。
 //        · 任务一（找新书源）：**实测 27 个候选站，没有一个比现有 3 个更好，所以没加。**
 //          结果分三类：
 //            · 劫持/停放页：b520.cc（有分类词但一个链接都没有，搜索全 404）、
@@ -615,6 +636,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.7.7.0")]
-[assembly: AssemblyFileVersion("1.7.7.0")]
-[assembly: AssemblyInformationalVersion("1.7.7")]
+[assembly: AssemblyVersion("1.7.8.0")]
+[assembly: AssemblyFileVersion("1.7.8.0")]
+[assembly: AssemblyInformationalVersion("1.7.8")]

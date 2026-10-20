@@ -30,7 +30,7 @@ namespace TomatoBiquga
         internal static readonly string[] SecretKeys = new string[]
         {
             "cookie", "token", "password", "passwd", "pwd", "secret",
-            "apikey", "api_key", "authorization", "auth", "session", "sign",
+            "apikey", "api_key", "authorization", "auth", "session", "sign", "proxy",
         };
 
         /// <summary>

@@ -2827,6 +2827,54 @@ namespace TomatoBiquga
 
             // ---------- 后台不减速：电源相关调用必须安全、可嵌套、可降级 ----------
             TestAppPower();
+
+            // ---------- 代理配置（以前 Http.Proxy 存在但没人能设置 = 死代码）----------
+            TestProxySetting();
+        }
+
+        /// <summary>
+        /// 代理配置：settings.ini 能存能读，并且**诊断包里要打码**。
+        ///
+        /// ★ 为什么值得单测：`Http.Proxy` 这个字段一直存在（curl 的 -x 和 .NET 的 WebProxy
+        ///   都支持），但**没有任何入口能设置它** —— 等于死代码。而实测：27 个小说站里
+        ///   19 个连不上/403，挂上代理后「飘天文学」从 403 变成 200、搜索可用。
+        ///   接上它是有实际价值的，所以存取必须可靠。
+        ///   另外代理串常带 `user:pass@`，诊断包里必须打码 —— 这条也一起钉住。
+        /// </summary>
+        private static void TestProxySetting()
+        {
+            string tmp = Path.Combine(Path.GetTempPath(), "nd_proxy_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(tmp);
+                string path = Path.Combine(tmp, "settings.ini");
+
+                // ① 有代理：存 → 读要一致
+                var a = new AppSettings { Proxy = "http://127.0.0.1:7897" };
+                a.Save(path);
+                string ini = File.ReadAllText(path, Encoding.UTF8);
+                Check("代理：settings.ini 里有 Proxy= 这一行",
+                    ini.IndexOf("Proxy=http://127.0.0.1:7897", StringComparison.Ordinal) >= 0);
+                var back = AppSettings.Load(path);
+                Eq("代理：读回来一致", "http://127.0.0.1:7897", back.Proxy);
+
+                // ② 没有代理：存空值、读回空（不是 null）
+                var b = new AppSettings { Proxy = "" };
+                b.Save(path);
+                var back2 = AppSettings.Load(path);
+                Eq("代理：空值读回来是空串", "", back2.Proxy);
+
+                // ③ 带账号密码的代理串，诊断包必须打码
+                Check("代理：诊断包会把 proxy 的值打码",
+                    DiagnosticsExporter.IsSecretKey("proxy"));
+                Eq("代理：带密码的代理串被打码",
+                    "proxy= " + DiagnosticsExporter.Mask,
+                    DiagnosticsExporter.SanitizeLine("proxy=socks5://user:pass@127.0.0.1:1080"));
+            }
+            finally
+            {
+                try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { }
+            }
         }
 
         /// <summary>

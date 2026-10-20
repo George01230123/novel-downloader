@@ -30,6 +30,15 @@ namespace TomatoBiquga
         public int CrawlTimeoutMinutes = 60;
         /// <summary>失败章节自动重试轮数：整本下完后，只对失败的那几章再跑一遍</summary>
         public int RetryPasses = 1;
+        /// <summary>
+        /// HTTP 代理（形如 http://127.0.0.1:7897），空 = 直连。
+        ///
+        /// ★ 以前 Http.Proxy 字段**存在但没人能设置**（没有 ini 键、没有界面）——
+        ///   等于死代码。而实测：27 个小说站里 19 个连不上/403，
+        ///   很可能就是网络问题而不是站点问题。接上它，用户挂个代理就能多几个源。
+        ///   只接受 http/https（SOCKS 由 curl 后端支持；.NET 后端不支持 SOCKS）。
+        /// </summary>
+        public string Proxy = "";
 
         /// <summary>
         /// 输出繁体：写盘时把正文从简体转成繁体（港台读者/阅读器用）。
@@ -118,6 +127,7 @@ namespace TomatoBiquga
                         if (k == "aibaseurl") { s.AiBaseUrl = v; continue; }
                         if (k == "aimodel") { s.AiModel = v; continue; }
                         if (k == "aiapikey") { s.AiApiKey = v; continue; }
+                        if (k == "proxy") { s.Proxy = v; continue; }
 
                         int n;
                         if (!int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out n)) continue;
@@ -192,6 +202,8 @@ namespace TomatoBiquga
             sb.AppendLine("MaxDelayMs=" + MaxDelayMs);
             sb.AppendLine("CrawlTimeoutMinutes=" + CrawlTimeoutMinutes);
             sb.AppendLine("RetryPasses=" + RetryPasses);
+            sb.AppendLine("# 代理：形如 proxy=http://127.0.0.1:7897（留空 = 直连）。只能填 http/https。");
+            sb.AppendLine("Proxy=" + Proxy);
             sb.AppendLine("# OutputTraditional=true 时，写盘/导出会把正文转成繁体（本地转换，不联网）");
             sb.AppendLine("OutputTraditional=" + (OutputTraditional ? "true" : "false"));
             sb.AppendLine();
