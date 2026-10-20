@@ -2836,6 +2836,75 @@ namespace TomatoBiquga
 
             // ---------- 慢章分段计时（DNS/连接/TLS/首字节）----------
             TestPhaseTiming();
+
+            // ---------- 任务队列的进度行 ----------
+            TestQueueLine();
+
+            // ---------- 队列路径必须真的把进度接上（源码级回归护栏）----------
+            TestQueueWiresProgress();
+        }
+
+        /// <summary>
+        /// 源码级护栏：`RunQueue` 里必须给 DownloadRunner 传 `OnProgress`。
+        ///
+        /// ★ 为什么值得写一条扫源码的测试：
+        ///   这个 bug（1.7.10 修的）是**结构性**的 —— 单本下载挂了 OnProgress，
+        ///   任务队列自己 new 了一个 DownloadRunner 却漏了，于是只有队列没有进度。
+        ///   而界面行为没法在离线测试里断言（要真起窗口、真联网）。
+        ///   于是退一步：断言"这段源码里必须出现 OnProgress ="。
+        ///   它不是完美的证明，但能挡住**同一个漏法再犯一次**（以后新增下载入口也一样）。
+        /// </summary>
+        private static void TestQueueWiresProgress()
+        {
+            string root = FindRepoRoot();
+            Check("队列进度：能找到仓库根目录", !string.IsNullOrEmpty(root));
+            if (string.IsNullOrEmpty(root)) return;
+            string path = Path.Combine(root, "src", "MainForm.cs");
+            Check("队列进度：MainForm.cs 存在", File.Exists(path));
+            if (!File.Exists(path)) return;
+
+            string src = File.ReadAllText(path, Encoding.UTF8);
+            int start = src.IndexOf("private void RunQueue(", StringComparison.Ordinal);
+            Check("队列进度：找到 RunQueue 方法", start >= 0);
+            if (start < 0) return;
+            int end = src.IndexOf("runner.Run();", start, StringComparison.Ordinal);
+            Check("队列进度：RunQueue 里有 runner.Run()", end > start);
+            if (end <= start) return;
+
+            string body = src.Substring(start, end - start);
+            Check("队列进度：RunQueue 给 DownloadRunner 传了 OnProgress",
+                body.IndexOf("OnProgress", StringComparison.Ordinal) >= 0);
+            Check("队列进度：用的是 QueueLine（带队列位置+书名）",
+                body.IndexOf("ProgressText.QueueLine", StringComparison.Ordinal) >= 0);
+            Check("队列进度：同时写窗口标题（标题永远看得见）",
+                body.IndexOf("ProgressText.Title", StringComparison.Ordinal) >= 0);
+        }
+
+        /// <summary>
+        /// 任务队列的进度行。
+        ///
+        /// ★ 为什么单测：任务队列原来**完全没接进度**（RunQueue 自己 new 了 DownloadRunner
+        ///   却没传 OnProgress），用户截图里就是"队列下载中…"一句话、进度条不动。
+        ///   队列必须同时回答三件事：第几本、哪本、这本下到哪 —— 少一件用户就还是不知道。
+        /// </summary>
+        private static void TestQueueLine()
+        {
+            string line = ProgressText.QueueLine(2, 5, "修真聊天群", 812, 1838,
+                TimeSpan.FromSeconds(123), 5.0);
+            Check("队列行：带队列位置", line.IndexOf("队列 2/5", StringComparison.Ordinal) >= 0);
+            Check("队列行：带书名", line.IndexOf("《修真聊天群》", StringComparison.Ordinal) >= 0);
+            Check("队列行：带章节进度和百分比",
+                line.IndexOf("812/1838（44%）", StringComparison.Ordinal) >= 0);
+            Check("队列行：带预计剩余时间", line.IndexOf("预计还需", StringComparison.Ordinal) >= 0);
+            // 队列场景不显示"并发"（那是单本下载的信息），而且不能留下"（并发 0）"这种残渣
+            Check("队列行：不出现并发数", line.IndexOf("并发", StringComparison.Ordinal) < 0);
+
+            // 没有总数时只报"在做什么"，不能崩
+            string line2 = ProgressText.QueueLine(1, 3, "某书", 0, 0, TimeSpan.Zero, 0);
+            Check("队列行：总数为 0 不崩", line2.IndexOf("队列 1/3", StringComparison.Ordinal) >= 0);
+            // 书名空着也不能出现《》
+            string line3 = ProgressText.QueueLine(1, 1, "", 10, 20, TimeSpan.FromSeconds(5), 2);
+            Check("队列行：没有书名时不出现书名号", line3.IndexOf("《", StringComparison.Ordinal) < 0);
         }
 
         /// <summary>

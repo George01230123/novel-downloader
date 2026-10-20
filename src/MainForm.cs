@@ -4922,6 +4922,7 @@ namespace TomatoBiquga
         private void RunQueue(System.Collections.Generic.List<string> keywords, Action<string> log, Func<bool> canceled)
         {
             int n = keywords.Count;
+            DateTime queueStarted = DateTime.MinValue;   // 队列总用时（进度条算 ETA 用）
             for (int i = 0; i < n; i++)
             {
                 if (canceled()) break;
@@ -5040,7 +5041,26 @@ namespace TomatoBiquga
                         OutputTraditional = _settings.OutputTraditional,
                         AppendToExistingFile = append,
                         IsCanceled = canceled,
+                        // ★ 队列也要有进度：以前这里**没传 OnProgress**，
+                        //   于是进度条全程不动、状态栏只有一句"队列下载中…"（用户截图就是这个）。
+                        //   现在一次说清三件事：第几本、哪本书、这本下到哪了。
+                        OnProgress = delegate (int qDone, int qTotal)
+                        {
+                            int idxNow = i + 1, cntNow = n;
+                            string titleNow = book.Title;
+                            UiInvoke(delegate
+                            {
+                                progress.Minimum = 0;
+                                progress.Maximum = Math.Max(1, qTotal);
+                                progress.Value = Math.Min(qDone, Math.Max(1, qTotal));
+                                lblStatus.Text = ProgressText.QueueLine(idxNow, cntNow, titleNow,
+                                    qDone, qTotal, DateTime.Now - queueStarted, 0);
+                                Text = ProgressText.Title(_defaultTitle, "队列 " + idxNow + "/" + cntNow,
+                                    qDone, qTotal);
+                            });
+                        },
                     };
+                    if (queueStarted == DateTime.MinValue) queueStarted = DateTime.Now;   // 第一次真正开跑才计时
                     runner.Run();
                     log(string.Format("  完成：成功 {0} 章，跳过 {1} 章，失败 {2} 章",
                         runner.Ok, runner.Skipped, runner.Failed));

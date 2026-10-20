@@ -69,6 +69,25 @@ namespace TomatoBiquga
             return string.Format("{0}（{1}…）", baseTitle, phase);
         }
 
+        /// <summary>
+        /// 队列下载的状态行：**队列位置 + 书名 + 章节进度**。
+        ///
+        /// ★ 为什么单列一个：任务队列是"一次排好几本"的用法，而它原来**完全没接进度**
+        ///   （RunQueue 自己 new 了 DownloadRunner，却没传 OnProgress）——
+        ///   用户看到的就是截图里那样：状态栏只有一句"队列下载中…"，进度条不动，
+        ///   日志里一堆同一秒完成的章节，但**不知道总共还剩多少**。
+        ///   队列场景必须同时回答三个问题：第几本、哪本、这本下到哪了。
+        /// </summary>
+        public static string QueueLine(int index, int count, string bookTitle,
+            int done, int total, TimeSpan used, double chaptersPerSecond)
+        {
+            string head = count > 0
+                ? string.Format("队列 {0}/{1}", index, count)
+                : "队列";
+            if (!string.IsNullOrEmpty(bookTitle)) head += "《" + bookTitle + "》";
+            return head + "　" + DownloadLine(done, total, used, chaptersPerSecond, 0)
+                .Replace("　（并发 0）", "").Replace("（并发 0）", "");
+        }
         /// <summary>时长格式化：3分20秒 / 1小时02分 / 45秒</summary>
         public static string Fmt(TimeSpan t)
         {
