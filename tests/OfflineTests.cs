@@ -2842,6 +2842,54 @@ namespace TomatoBiquga
 
             // ---------- 队列路径必须真的把进度接上（源码级回归护栏）----------
             TestQueueWiresProgress();
+
+            // ---------- 下载抛异常时，电源/日志回调必须被清理 ----------
+            TestRunnerCleanupOnException();
+        }
+
+        /// <summary>
+        /// 下载**抛异常**时也必须清理：恢复"允许系统睡眠"、摘掉慢请求日志回调。
+        ///
+        /// ★ 这条是为一个真实缺陷补的（1.7.7 引入、本轮修掉）：
+        ///   原来 `AppPower.KeepAwakeEnd()` 写在 Run 的**最后一行**，
+        ///   中途抛异常就跳过它 → 计数永远不归零 →
+        ///   这个进程从此**永久阻止系统睡眠**（用户合盖也不睡，且完全不知道是我干的）。
+        ///   回调也一样：一直持有已经关闭的界面日志器（泄漏 + 往死对象里写日志）。
+        ///   修法是 try/finally。这里用"必然失败的目录"制造异常路径来钉住它。
+        /// </summary>
+        private static void TestRunnerCleanupOnException()
+        {
+            var site = SiteRegistry.ByKey("xbiquwk");
+            Check("清理：能找到 xbiquwk 站点", site != null);
+            if (site == null) return;
+
+            AppPower.ResetForTest();
+            Http.SlowRequestLogger = null;
+
+            var book = new BookInfo { Title = "清理探针", Site = "xbiquwk" };
+            var runner = new DownloadRunner
+            {
+                Site = site.Factory(),
+                Book = book,
+                Chapters = new System.Collections.Generic.List<ChapterInfo>
+                {
+                    new ChapterInfo { Id = "1", Title = "第1章" },
+                },
+                // 不存在的盘符：在 KeepAwakeBegin 之后立刻抛，正好走异常路径
+                RootDir = @"Z:\__definitely_not_here__",
+                Workers = 1,
+                Log = delegate (string s) { },
+                IsCanceled = delegate () { return false; },
+            };
+
+            bool threw = false;
+            try { runner.Run(); }
+            catch (Exception) { threw = true; }
+
+            Check("清理：非法目录确实抛异常（否则本测试是空转）", threw);
+            Eq("清理：异常后 KeepAwake 计数归零", 0, AppPower.AwakeDepthForTest);
+            Check("清理：异常后不再阻止系统睡眠", !AppPower.IsKeepingAwake);
+            Check("清理：异常后慢请求回调已摘掉", Http.SlowRequestLogger == null);
         }
 
         /// <summary>
@@ -2857,8 +2905,15 @@ namespace TomatoBiquga
         private static void TestQueueWiresProgress()
         {
             string root = FindRepoRoot();
-            Check("队列进度：能找到仓库根目录", !string.IsNullOrEmpty(root));
-            if (string.IsNullOrEmpty(root)) return;
+            // ★ 脱离源码目录时**跳过**，不算失败：
+            //   发布包里只有 exe，用户跑 `--selftest` 时不该因为"找不到 src\MainForm.cs"而红。
+            //   这条断言是**构建期护栏**，只在仓库里跑才有意义。
+            if (string.IsNullOrEmpty(root))
+            {
+                Check("队列进度：（跳过：不在源码目录，发布包里没有 src\\）", true);
+                return;
+            }
+            Check("队列进度：能找到仓库根目录", true);
             string path = Path.Combine(root, "src", "MainForm.cs");
             Check("队列进度：MainForm.cs 存在", File.Exists(path));
             if (!File.Exists(path)) return;

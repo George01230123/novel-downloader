@@ -23,7 +23,32 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
-// 1.7.10：任务队列也有进度了（用户截图：队列下载时进度条全程不动）。
+// 1.7.11：封档前的体检 —— 修一个真缺陷、删死代码、砍重复包体。
+//        · 【真缺陷】下载抛异常时**不清理**：我 1.7.7 把 `AppPower.KeepAwakeEnd()` 写在
+//          Run 的最后一行，中途抛异常就跳过它 → KeepAwake 计数永远不归零 →
+//          这个进程从此**永久阻止系统睡眠**（用户合盖也不睡，而且完全不知道是我干的）。
+//          慢请求回调也一样：一直持有已经关闭的界面日志器（泄漏 + 往死对象里写日志）。
+//          修法：Run 的主体包进 try/finally，结束时必定 KeepAwakeEnd + 摘下回调。
+//          验证：用一个**必然失败**的目标（不存在的 Z: 盘）制造异常路径，
+//          实测"抛异常后计数归零 / 不再阻止睡眠 / 回调已摘掉"，并固化成离线断言。
+//        · 【体检结论】没有阻塞式隐患：`.Result`/`.Wait()` 的命中都是误报（属性名、
+//          SemaphoreSlim），9 处 Thread.Sleep 全在 worker 线程，没有界面线程阻塞。
+//          全吞异常的 `catch { }` 有 100 处，但都用在"尽力而为"的清理路径上，不动。
+//        · 【死代码】删掉 7 个只定义、从不调用的方法（59 行）：
+//          EmptyOr / HasUrlOrAdWord / CleanSiteLabel / PageOf / ToText /
+//          WriteWithHeader / IndexOfByteBackward。**exe 一个字节都没小**（549,376 B 不变）——
+//          诚实记一笔：体积根本不在这些方法上。
+//        · 【体积真相】用 REA 读了 PE 结构：549,376 B 里 **元数据就占 279,316 B（51%）**，
+//          没有嵌入资源。而自带自测（tests\OfflineTests.cs 编进主程序，让 `--selftest` 可用）
+//          实测多占 **173,056 B（31.5%）**。
+//        · 【决定】**保留**自带自测：它是"一个 bug 报告 = 一条命令"的能力，也是五项门禁之一；
+//          砍掉能省 31%，但代价是把排障能力交出去 —— 不值。
+//        · 【真正的包体优化】改为**砍重复**：dist 里 9 个 exe 合计 3,685,888 B，
+//          其中 **3,136,512 B（85%）是同一套代码的副本**（每个测试 exe 都重新编进了整个应用）。
+//          发布包从"主程序 + 7 个工具"改成"主程序 + 3 个工具（离线自测/文字体检/布局探针）"，
+//          其余 5 个（e2e/selftest/aimock/edgetest/liveprobe）是开发期用的，CI 从源码构建即可：
+//          自测包 1.66 MB → 约 0.6 MB（**-64%**）。主包本来就是单文件 276 KB，没有可砍的。
+//        · 断言：离线 1800（+5，含"异常后必须清理"）、GUI 1615，五项门禁全 0。// 1.7.10：任务队列也有进度了（用户截图：队列下载时进度条全程不动）。
 //        · 现象：状态栏只有一句"队列下载中…"，进度条空着，日志里一串同一秒完成的章节，
 //          用户完全不知道队列还剩几本、这本下到哪 —— 直接问"进度条呢"。
 //        · 根因：**RunQueue 自己 new 了一个 DownloadRunner，却没传 OnProgress**。
@@ -676,6 +701,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.7.10.0")]
-[assembly: AssemblyFileVersion("1.7.10.0")]
-[assembly: AssemblyInformationalVersion("1.7.10")]
+[assembly: AssemblyVersion("1.7.11.0")]
+[assembly: AssemblyFileVersion("1.7.11.0")]
+[assembly: AssemblyInformationalVersion("1.7.11")]

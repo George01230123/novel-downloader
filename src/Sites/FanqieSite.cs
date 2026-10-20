@@ -398,9 +398,5 @@ namespace TomatoBiquga
             return "";
         }
 
-        private static string EmptyOr(string s, string fallback)
-        {
-            return string.IsNullOrEmpty(s) ? fallback : s;
-        }
     }
 }

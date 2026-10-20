@@ -177,6 +177,14 @@ namespace TomatoBiquga
             //   TLS 握手（https 站 0.3~0.6s）或站点自身首字节慢。
             Http.SlowRequestLogger = delegate (string s) { Log("  慢章：" + s); };
 
+            // ★ 从这里开始**必须保证清理**：无论成功、取消还是抛异常，
+            //   都要把"阻止系统睡眠"和"慢请求日志回调"恢复掉。
+            //   反例（我 1.7.7 的写法）：异常路径跳过 KeepAwakeEnd → 计数永远不归零 →
+            //   这个进程从此**永久阻止系统睡眠**（合盖也不睡）；
+            //   回调还会一直持有已经关闭的界面日志器（泄漏 + 往死对象里写日志）。
+            try
+            {
+
             var root = string.IsNullOrEmpty(RootDir)
                 ? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载")
                 : RootDir;
@@ -325,8 +333,13 @@ namespace TomatoBiquga
             if (FromCacheCount > 0)
                 Log(string.Format("其中 {0}/{1} 章直接复用了目录遍历时已抓到的正文（未重复请求站点）", FromCacheCount, Ok));
             Log(string.Format("本次下载：成功 {0} 章，跳过 {1} 章（其中已下载过 {3} 章），失败 {2} 章", Ok, Skipped, Failed, SkippedDownloaded));
-            // 下载结束：恢复系统默认电源行为（必须在最后，且与上面的 Begin 成对）
-            AppPower.KeepAwakeEnd();
+            }
+            finally
+            {
+                // 恢复系统默认电源行为 + 摘掉回调用（见上面 try 的注释）
+                AppPower.KeepAwakeEnd();
+                Http.SlowRequestLogger = null;
+            }
         }
 
         /// <summary>文件里"有正文"的章节数（统计和进度标记用；没有锚点时返回 0）</summary>
@@ -1186,15 +1199,6 @@ namespace TomatoBiquga
             }
             catch { return false; }
         }
-        /// <summary>在字节数组里从 to 往前找某个字节（用来定位"某一行的行首"）</summary>
-        internal static int IndexOfByteBackward(byte[] haystack, int from, int to, byte value)
-        {
-            if (haystack == null) return -1;
-            int lo = Math.Max(0, from);
-            int hi = Math.Min(haystack.Length - 1, to);
-            for (int i = hi; i >= lo; i--) if (haystack[i] == value) return i;
-            return -1;
-        }
         internal static int IndexOfByte(byte[] haystack, int from, int len, byte value)
         {
             if (haystack == null) return -1;
@@ -1217,18 +1221,6 @@ namespace TomatoBiquga
             return -1;
         }
 
-        private void WriteWithHeader(string body)
-        {
-            // 整文件重写路径（自测用）：同样带上预留表头区，保证后续 FixHeaderNow 行为一致
-            var tmp = OutputFile + ".tmp";
-            using (var w = new StreamWriter(tmp, false, HeaderEncoding()))
-            {
-                w.Write(BuildHeaderZone());
-                w.Write(body);
-            }
-            if (File.Exists(OutputFile)) File.Delete(OutputFile);
-            File.Move(tmp, OutputFile);
-        }
 
         /// <summary>
         /// 把开头的表头替换成准确统计，而不必把整本书（可能几 MB）重写一遍。
@@ -1551,14 +1543,6 @@ namespace TomatoBiquga
                 || t.IndexOf('!') >= 0 || t.IndexOf('?') >= 0;
         }
 
-        private static bool HasUrlOrAdWord(string t)
-        {
-            if (t.IndexOf("http", StringComparison.OrdinalIgnoreCase) >= 0) return true;
-            if (t.IndexOf("www.", StringComparison.OrdinalIgnoreCase) >= 0) return true;
-            if (t.IndexOf(".com", StringComparison.OrdinalIgnoreCase) >= 0) return true;
-            if (GzhVariant.IsMatch(t)) return true;
-            return ContainsAny(t, AdWords);
-        }
 
         /// <summary>
         /// 作者本人写在章节里的话。

@@ -702,11 +702,6 @@ namespace TomatoBiquga
             return page == 1 ? cid : cid + "_" + page;
         }
 
-        internal static int PageOf(string key)
-        {
-            int i = key.IndexOf('_');
-            return i < 0 ? 1 : int.Parse(key.Substring(i + 1));
-        }
 
         /// <summary>
         /// 解析 /10_10333/10032108_2.html 这样的路径 -> (cid, 页码)

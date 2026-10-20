@@ -196,18 +196,5 @@ namespace TomatoBiquga
             t.Start();
         }
 
-        /// <summary>把表格内容导出成一行行文本（日志/诊断包复用）</summary>
-        internal string ToText()
-        {
-            var sb = new StringBuilder();
-            if (_list == null) return "";
-            foreach (ListViewItem it in _list.Items)
-            {
-                var cells = new List<string>();
-                foreach (ListViewItem.ListViewSubItem sub in it.SubItems) cells.Add(sub.Text);
-                sb.AppendLine(string.Join(" | ", cells.ToArray()));
-            }
-            return sb.ToString();
-        }
     }
 }

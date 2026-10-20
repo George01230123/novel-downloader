@@ -1932,14 +1932,6 @@ namespace TomatoBiquga
         /// <summary>正在实测评分</summary>
         private bool _rating;
 
-        /// <summary>去掉"（当前不可用）"后缀的纯站点名，解决"名字前后空格对不上"</summary>
-        private static string CleanSiteLabel(string s)
-        {
-            if (string.IsNullOrEmpty(s)) return "";
-            int i = s.IndexOf("（当前不可用）", StringComparison.Ordinal);
-            if (i < 0) i = s.IndexOf("(当前不可用)", StringComparison.Ordinal);
-            return (i >= 0 ? s.Substring(0, i) : s).Trim();
-        }
 
         /// <summary>当前该用哪个站点 Key（考虑"自动选最快"）</summary>
         private string EffectiveSiteKey()
