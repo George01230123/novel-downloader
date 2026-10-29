@@ -329,6 +329,7 @@ namespace TomatoBiquga
                 TestOutputEncoding(work, ref _fakeNet);
                 TestIncrementalAppend(work, ref _fakeNet);
                 TestParallelDownload(work);
+                TestDownloadThrottleReset(work, ref _fakeNet);
                 TestCurlPathConcurrent();
                 TestEpub(work);
                 TestParseTxt(work);
@@ -2019,6 +2020,39 @@ namespace TomatoBiquga
                 return sb.ToString();
             }
         }
+
+        private static void TestDownloadThrottleReset(string work, ref int fakeNet)
+        {
+            Http.ResetThrottle();
+            Http.NoteThrottle();
+            var standalone = new DownloadRunner
+            {
+                Site = new FakeSite(ref fakeNet),
+                Book = new BookInfo { Site = "biquga", Title = "单本限流状态" },
+                Chapters = new List<ChapterInfo> { new ChapterInfo { Id = "single", Title = "第一章", Text = "已有缓存正文，不会发起网络请求。" } },
+                RootDir = Path.Combine(work, "throttle-reset"),
+                RetryPasses = 0,
+                Log = delegate { },
+            };
+            standalone.Run();
+            Eq("下载状态：单本下载开始时清空旧限流状态", 0, Http.ThrottleHits);
+
+            Http.NoteThrottle();
+            var queued = new DownloadRunner
+            {
+                Site = new FakeSite(ref fakeNet),
+                Book = new BookInfo { Site = "biquga", Title = "队列限流状态" },
+                Chapters = new List<ChapterInfo> { new ChapterInfo { Id = "queued", Title = "第一章", Text = "已有缓存正文，不会发起网络请求。" } },
+                RootDir = Path.Combine(work, "throttle-preserve"),
+                RetryPasses = 0,
+                ResetThrottleOnStart = false,
+                Log = delegate { },
+            };
+            queued.Run();
+            Eq("下载状态：队列下一本保留已有降速状态", 1, Http.ThrottleHits);
+            Http.ResetThrottle();
+        }
+
         // ============================================================
         //  11) 增量更新的进度标记（表头里的 #progress-ok:N:指纹）
         // ============================================================
@@ -2027,6 +2061,11 @@ namespace TomatoBiquga
         {
             var dir = Path.Combine(work, "progress");
             Directory.CreateDirectory(dir);
+            var large = Path.Combine(dir, "large.txt");
+            File.WriteAllText(large, "prefix" + new string('x', 20000), new UTF8Encoding(false));
+            var prefix = DownloadRunner.ReadFilePrefix(large, 16384);
+            Eq("表头扫描：仅读取请求的前缀长度", 16384, prefix.Length);
+            Eq("表头扫描：前缀内容正确", "prefix", Encoding.UTF8.GetString(prefix, 0, 6));
             var path = Path.Combine(dir, "进度测试.txt");
 
             var book = new BookInfo { Site = "biquga", Title = "进度测试", Author = "作者", Dir = "/1_2/", Url = "u" };
@@ -2800,6 +2839,7 @@ namespace TomatoBiquga
 
             // ---------- AutoThrottle：尊重 Retry-After + 带迟滞的恢复 ----------
             TestAutoThrottle();
+            TestHttpRequestStateIsolation();
 
             // ---------- 站点诊断：0 条时要说清是"没这本书"还是"改版/被拦" ----------
             TestSiteDiagnostics();
@@ -3785,6 +3825,8 @@ namespace TomatoBiquga
                 0, Http.ExtractRetryAfter("HTTP/1.1 200 OK\r\nServer: nginx\r\n"));
             Eq("限流：大小写不敏感", 7,
                 Http.ExtractRetryAfter("HTTP/1.1 429\r\nretry-after: 7\r\n"));
+            Check("限流：502 属于可重试服务错误但不计入限流", !Http.IsThrottleStatus(502));
+            Check("限流：429 会计入限流", Http.IsThrottleStatus(429));
 
             // ③ 迟滞：限流后并发下降；**要连续成功够多次**才恢复一档
             Http.ResetThrottle();
@@ -3819,6 +3861,31 @@ namespace TomatoBiquga
 
             Http.ResetThrottle();
             Eq("限流：Reset 之后回到原值", configured, Http.AdaptiveWorkers(configured));
+        }
+
+        private static void TestHttpRequestStateIsolation()
+        {
+            var barrier = new System.Threading.Barrier(2);
+            var ok = new bool[2];
+            var threads = new System.Threading.Thread[2];
+            for (int i = 0; i < threads.Length; i++)
+            {
+                int index = i;
+                threads[i] = new System.Threading.Thread(() =>
+                {
+                    Http.RequestStatusCode = index == 0 ? 429 : 200;
+                    Http.RequestRetryAfterSeconds = index == 0 ? 30 : 0;
+                    barrier.SignalAndWait();
+                    ok[index] = Http.RequestStatusCode == (index == 0 ? 429 : 200)
+                        && Http.RequestRetryAfterSeconds == (index == 0 ? 30 : 0);
+                });
+                threads[i].IsBackground = true;
+                threads[i].Start();
+            }
+            foreach (var thread in threads) thread.Join(5000);
+            Check("HTTP 并发：状态码与 Retry-After 按请求线程隔离", ok[0] && ok[1]);
+            Http.RequestStatusCode = 0;
+            Http.RequestRetryAfterSeconds = 0;
         }
 
         /// <summary>

@@ -34,6 +34,9 @@ jobs:
       - name: Build layout probe
         run: dotnet build build/NovelDownloader.Probe.csproj -c Release
 
+      - name: Build text fit probe
+        run: dotnet build build/NovelDownloader.TextFit.csproj -c Release
+
       # _e2e 是独立工程（它有自己的 Main，混进 Tests 工程会和 OfflineTests 的入口冲突），
       # 所以必须单独编 —— 漏了这一步下面那一步会因为找不到 _e2e.exe 而失败。
       - name: Build end-to-end check

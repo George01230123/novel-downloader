@@ -67,6 +67,22 @@ namespace TomatoBiquga
         /// <summary>最近一次收到的 HTTP 状态码（0 = 未知/非 HTTP 后端）</summary>
         public static int LastStatusCode;
 
+        // Download decisions use per-thread response state; Last* fields remain diagnostic snapshots.
+        [ThreadStatic] private static int _requestStatusCode;
+        [ThreadStatic] private static int _requestRetryAfterSeconds;
+
+        internal static int RequestStatusCode
+        {
+            get { return _requestStatusCode; }
+            set { _requestStatusCode = value; LastStatusCode = value; }
+        }
+
+        internal static int RequestRetryAfterSeconds
+        {
+            get { return _requestRetryAfterSeconds; }
+            set { _requestRetryAfterSeconds = value; LastRetryAfterSeconds = value; }
+        }
+
         /// <summary>最近一次 curl 实际执行的参数（诊断用；不含 URL 里的敏感查询串不处理）</summary>
         public static string LastCurlArgs;
 
@@ -268,7 +284,7 @@ namespace TomatoBiquga
                 {
                     System.Threading.Interlocked.Increment(ref _replayHits);
                     LastBackend = "回放";
-                    LastStatusCode = ReadCachedStatus(Path.Combine(ReplayDir, key + ".meta"));
+                    RequestStatusCode = ReadCachedStatus(Path.Combine(ReplayDir, key + ".meta"));
                     return File.ReadAllBytes(f);
                 }
             }
@@ -377,20 +393,15 @@ namespace TomatoBiquga
         /// </summary>
         public static string GetWithTimeout(string url, int timeoutSeconds)
         {
-            int oldTimeout = TimeoutSeconds;
-            int oldRetries = MaxRetries;
-            try
-            {
-                TimeoutSeconds = Math.Max(1, timeoutSeconds);
-                MaxRetries = 1;
-                if (CurlAvailable) return FetchWithCurl(url, null, null);
-                return FetchWithDotNet(url, null, null);
-            }
-            finally
-            {
-                TimeoutSeconds = oldTimeout;
-                MaxRetries = oldRetries;
-            }
+            int timeout = Math.Max(1, timeoutSeconds);
+            if (CurlAvailable) return FetchWithCurl(url, null, null, timeoutSeconds: timeout);
+            return FetchWithDotNet(url, null, null, timeoutSeconds: timeout);
+        }
+
+        internal static string GetWithTimeoutAndRetries(string url, string referer,
+            int timeoutSeconds, int maxRetries)
+        {
+            return Request(url, null, referer, Math.Max(1, timeoutSeconds), Math.Max(1, maxRetries));
         }
 
         /// <summary>
@@ -407,36 +418,18 @@ namespace TomatoBiquga
         public static string PostJson(string url, string jsonBody, Dictionary<string, string> headers,
             int timeoutSeconds = 0)
         {
-            int oldTimeout = TimeoutSeconds;
-            int oldRetries = MaxRetries;
-            try
+            int timeout = timeoutSeconds > 0 ? timeoutSeconds : TimeoutSeconds;
+            if (CurlAvailable)
             {
-                // AI 调用常常要几十秒（尤其本地小模型），而且**不要自动重试** ——
-                // 重试会让一次慢请求变成三次慢请求，用户会以为程序卡死。
-                if (timeoutSeconds > 0) TimeoutSeconds = timeoutSeconds;
-                MaxRetries = 1;
-
-                try
-                {
-                    if (CurlAvailable) return FetchWithCurl(url, jsonBody, null, null, "application/json", headers);
-                    return FetchWithDotNet(url, jsonBody, null, null, "application/json", headers);
-                }
+                try { return FetchWithCurl(url, jsonBody, null, null, "application/json", headers, timeout); }
                 catch (Exception ex)
                 {
-                    // 后端回退：curl 不通时试 .NET（本地 Ollama 有时候 curl 会有代理干扰）
-                    if (CurlAvailable)
-                    {
-                        try { return FetchWithDotNet(url, jsonBody, null, null, "application/json", headers); }
-                        catch { }
-                    }
-                    throw new Exception("AI 接口请求失败：" + ex.Message);
+                    try { return FetchWithDotNet(url, jsonBody, null, null, "application/json", headers, timeout); }
+                    catch { throw new Exception("AI 接口请求失败：" + ex.Message); }
                 }
             }
-            finally
-            {
-                TimeoutSeconds = oldTimeout;
-                MaxRetries = oldRetries;
-            }
+            try { return FetchWithDotNet(url, jsonBody, null, null, "application/json", headers, timeout); }
+            catch (Exception ex) { throw new Exception("AI 接口请求失败：" + ex.Message); }
         }
 
         /// <summary>
@@ -549,7 +542,8 @@ namespace TomatoBiquga
             catch { return null; }
         }
 
-        private static string Request(string url, string body, string referer)
+        private static string Request(string url, string body, string referer,
+            int timeoutSeconds = 0, int maxRetries = 0)
         {
             // ★ 回放优先：命中就直接用录好的响应，**一个字节都不联网**。
             //   放在重试循环外面：回放要么命中（成功返回），要么未命中（继续联网）。
@@ -567,8 +561,10 @@ namespace TomatoBiquga
                 // 录制内容解不出文字（空的/坏文件）→ 当未命中，继续联网
             }
 
+            int requestTimeout = timeoutSeconds > 0 ? timeoutSeconds : TimeoutSeconds;
+            int requestRetries = maxRetries > 0 ? maxRetries : MaxRetries;
             Exception last = null;
-            for (int attempt = 0; attempt < MaxRetries; attempt++)
+            for (int attempt = 0; attempt < requestRetries; attempt++)
             {
                 try
                 {
@@ -576,17 +572,18 @@ namespace TomatoBiquga
                     //   否则上一轮留下的状态码会漏到这一轮：比如第 1 次是 502、
                     //   第 2 次其实成功了，判据读到的却还是 502，于是把一个正常响应
                     //   当成错误丢掉。状态码是"逐次"的，不是"粘住"的。
-                    LastStatusCode = 0;
+                    RequestStatusCode = 0;
+                    RequestRetryAfterSeconds = 0;
 
                     string text;
                     if (CurlAvailable)
                     {
-                        text = FetchWithCurl(url, body, referer);
+                        text = FetchWithCurl(url, body, referer, timeoutSeconds: requestTimeout);
                         LastBackend = "curl";
                     }
                     else
                     {
-                        text = FetchWithDotNet(url, body, referer);
+                        text = FetchWithDotNet(url, body, referer, timeoutSeconds: requestTimeout);
                         LastBackend = ".NET";
                     }
                     if (string.IsNullOrEmpty(text)) throw new Exception("返回内容为空");
@@ -595,12 +592,16 @@ namespace TomatoBiquga
                     // ★ 502 是实测加的：笔趣阁的源站会间歇性回 nginx 502
                     //   （实测 20 次里出现过、也出现过连续 502），
                     //   它**不是**限流（别降并发），但确实该重试。
-                    if (IsRetryableStatus(LastStatusCode))
+                    if (IsRetryableStatus(RequestStatusCode))
                     {
-                        NoteThrottle();
-                        throw new ThrottledException(string.Format("站点限流（HTTP {0}）", LastStatusCode));
+                        if (IsThrottleStatus(RequestStatusCode))
+                        {
+                            NoteThrottle();
+                            throw new ThrottledException(string.Format("站点限流（HTTP {0}）", RequestStatusCode));
+                        }
+                        throw new Exception(string.Format("站点临时错误（HTTP {0}）", RequestStatusCode));
                     }
-                    if (LastStatusCode == 403)
+                    if (RequestStatusCode == 403)
                     {
                         NoteThrottle();
                         throw new ThrottledException("被站点拒绝（HTTP 403，可能需要 Cookie 或代理）");
@@ -634,7 +635,7 @@ namespace TomatoBiquga
                     {
                         try
                         {
-                            var t = FetchWithDotNet(url, body, referer);
+                            var t = FetchWithDotNet(url, body, referer, timeoutSeconds: requestTimeout);
                             if (!string.IsNullOrEmpty(t)) { LastBackend = ".NET(回退)"; return t; }
                         }
                         catch (Exception ex2)
@@ -648,7 +649,7 @@ namespace TomatoBiquga
                             NoteSchannelRejected(url, ex2.Message);
                         }
                     }
-                    if (attempt < MaxRetries - 1) SleepBackoff(attempt, ex is ThrottledException);
+                    if (attempt < requestRetries - 1) SleepBackoff(attempt, ex is ThrottledException);
 
                     // ★ 限流**最多等一次就放弃**（不再连睡 3 轮）。
                     //
@@ -685,7 +686,7 @@ namespace TomatoBiquga
             if (last is TimeoutLikeException)
                 throw new Exception(Shorten(url) + "\n  " + reason);
             throw new Exception(string.Format("请求失败（已重试 {0} 次）：{1}\n  {2}",
-                MaxRetries, Shorten(url), reason));
+                requestRetries, Shorten(url), reason));
         }
 
         // ---------------------------------------------------------- 退避与限速自适应
@@ -750,6 +751,11 @@ namespace TomatoBiquga
         internal static bool IsRetryableStatus(int code)
         {
             return code == 429 || code == 502 || code == 503;
+        }
+
+        internal static bool IsThrottleStatus(int code)
+        {
+            return code == 429 || code == 503;
         }
 
         /// <summary>
@@ -824,7 +830,7 @@ namespace TomatoBiquga
         private static void SleepBackoff(int attempt, bool throttled)
         {
             long ms;
-            int ra = throttled ? LastRetryAfterSeconds : 0;
+            int ra = throttled ? RequestRetryAfterSeconds : 0;
             if (ra > 0)
             {
                 ms = (long)Math.Min(ra, MaxBackoffMs / 1000) * 1000L;
@@ -918,8 +924,11 @@ namespace TomatoBiquga
 
         internal static void NoteThrottle()
         {
-            if (_throttleHits < 1000) _throttleHits++;
-            _consecutiveOk = 0;          // 刚被限流：连续成功计数归零
+            lock (ThrottleLock)
+            {
+                if (_throttleHits < 1000) _throttleHits++;
+                _consecutiveOk = 0;
+            }
         }
 
         /// <summary>
@@ -932,11 +941,14 @@ namespace TomatoBiquga
         /// </summary>
         internal static void NoteSuccess()
         {
-            if (_throttleHits <= 0) { _consecutiveOk = 0; return; }
-            _consecutiveOk++;
-            if (_consecutiveOk < RecoverAfterSuccesses) return;
-            _consecutiveOk = 0;
-            _throttleHits--;
+            lock (ThrottleLock)
+            {
+                if (_throttleHits <= 0) { _consecutiveOk = 0; return; }
+                _consecutiveOk++;
+                if (_consecutiveOk < RecoverAfterSuccesses) return;
+                _consecutiveOk = 0;
+                _throttleHits--;
+            }
         }
 
         /// <summary>连续成功多少次才允许把并发恢复一档（迟滞阈值）</summary>
@@ -949,13 +961,18 @@ namespace TomatoBiquga
         public static int LastRetryAfterSeconds;
 
         /// <summary>当前建议的并发数（配合 <see cref="AdaptiveWorkers"/> 用）</summary>
-        public static int ThrottleHits { get { return _throttleHits; } }
+        private static readonly object ThrottleLock = new object();
+
+        public static int ThrottleHits { get { lock (ThrottleLock) return _throttleHits; } }
 
         /// <summary>清空限流计数（每本书开始时调用，免得上一本的账算到这一本头上）</summary>
         public static void ResetThrottle()
         {
-            _throttleHits = 0;
-            _consecutiveOk = 0;
+            lock (ThrottleLock)
+            {
+                _throttleHits = 0;
+                _consecutiveOk = 0;
+            }
             LastRetryAfterSeconds = 0;
         }
 
@@ -965,7 +982,9 @@ namespace TomatoBiquga
         /// </summary>
         public static int AdaptiveWorkers(int configured)
         {
-            int w = configured - (_throttleHits / 2);
+            int hits;
+            lock (ThrottleLock) hits = _throttleHits;
+            int w = configured - (hits / 2);
             if (w < 1) w = 1;
             if (w > configured) w = configured;
             return w;
@@ -975,13 +994,14 @@ namespace TomatoBiquga
 
         private static string FetchWithCurl(string url, string body, string referer,
             string userAgent = null, string accept = null,
-            Dictionary<string, string> extraHeaders = null)
+            Dictionary<string, string> extraHeaders = null, int timeoutSeconds = 0)
         {
+            int timeout = timeoutSeconds > 0 ? timeoutSeconds : TimeoutSeconds;
             var tmp = Path.Combine(Path.GetTempPath(), "tb_" + Guid.NewGuid().ToString("N") + ".html");
             try
             {
                 var args = new StringBuilder();
-                args.Append("-s -L --max-time ").Append(TimeoutSeconds);
+                args.Append("-s -L --max-time ").Append(timeout);
                 args.Append(" --compressed");
                 args.Append(" -A \"").Append(string.IsNullOrEmpty(userAgent) ? UserAgent : userAgent).Append('"');
                 args.Append(" -H \"Accept-Language: zh-CN,zh;q=0.9\"");
@@ -1047,7 +1067,7 @@ namespace TomatoBiquga
                 {
                     stdout = p.StandardOutput.ReadToEnd();
                     var err = p.StandardError.ReadToEnd();
-                    if (!p.WaitForExit((TimeoutSeconds + 15) * 1000))
+                    if (!p.WaitForExit((timeout + 15) * 1000))
                     {
                         try { p.Kill(); } catch { }
                         throw new Exception("curl 超时");
@@ -1058,7 +1078,7 @@ namespace TomatoBiquga
 
                 if (!File.Exists(tmp)) throw new Exception("curl 没有产生输出文件");
                 ParsePhases(stdout);            // 先拆阶段计时（同时把状态码算出来）
-                LastStatusCode = ParseHttpCode(PhasesCodePart(stdout));
+                RequestStatusCode = ParseHttpCode(PhasesCodePart(stdout));
 
                 // ★ 慢请求：主动记一行"慢在哪一段"。
                 //   没有这一行，用户只能说"有时候很慢"，我只能靠手工 curl 复盘（这次就是这么查的）。
@@ -1072,7 +1092,7 @@ namespace TomatoBiquga
                 try
                 {
                     if (File.Exists(hdr))
-                        LastRetryAfterSeconds = ExtractRetryAfter(File.ReadAllText(hdr));
+                        RequestRetryAfterSeconds = ExtractRetryAfter(File.ReadAllText(hdr));
                 }
                 catch { }
                 var bytes = File.ReadAllBytes(tmp);
@@ -1124,14 +1144,15 @@ namespace TomatoBiquga
 
         private static string FetchWithDotNet(string url, string body, string referer,
             string userAgent = null, string accept = null,
-            Dictionary<string, string> extraHeaders = null)
+            Dictionary<string, string> extraHeaders = null, int timeoutSeconds = 0)
         {
-            LastStatusCode = 0;
+            int timeout = timeoutSeconds > 0 ? timeoutSeconds : TimeoutSeconds;
+            RequestStatusCode = 0;
             var req = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(url);
             req.Method = body == null ? "GET" : "POST";
             req.UserAgent = string.IsNullOrEmpty(userAgent) ? UserAgent : userAgent;
-            req.Timeout = TimeoutSeconds * 1000;
-            req.ReadWriteTimeout = TimeoutSeconds * 1000;
+            req.Timeout = timeout * 1000;
+            req.ReadWriteTimeout = timeout * 1000;
             req.AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate;
             req.Accept = string.IsNullOrEmpty(accept)
                 ? "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
@@ -1184,7 +1205,7 @@ namespace TomatoBiquga
                 using (var s = resp.GetResponseStream())
                 using (var ms = new MemoryStream())
                 {
-                    LastStatusCode = (int)resp.StatusCode;
+                    RequestStatusCode = (int)resp.StatusCode;
                     var buf = new byte[16384];
                     int n;
                     while ((n = s.Read(buf, 0, buf.Length)) > 0) ms.Write(buf, 0, n);
@@ -1195,7 +1216,7 @@ namespace TomatoBiquga
             {
                 // 4xx/5xx 在 .NET 里是异常，但状态码是有价值的信息（429/503 要冷却）
                 var hr = we.Response as System.Net.HttpWebResponse;
-                if (hr != null) LastStatusCode = (int)hr.StatusCode;
+                if (hr != null) RequestStatusCode = (int)hr.StatusCode;
                 throw;
             }
         }
