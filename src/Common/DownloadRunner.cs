@@ -57,6 +57,9 @@ namespace TomatoBiquga
         /// </summary>
         public int Workers = 1;
 
+        /// <summary>默认每次单本下载重置限流状态；队列内由队列统一管理状态</summary>
+        public bool ResetThrottleOnStart = true;
+
         // 增量写盘用：攒够一批就 append，避免每次都重写整个文件
         private StringBuilder _pending = new StringBuilder();
         private bool _headerWritten;
@@ -196,9 +199,8 @@ namespace TomatoBiquga
             if (!Directory.Exists(BookDir))
                 throw new Exception("创建目录失败：" + BookDir + "（可能没有写入权限）");
 
-            // 每本书从零开始算限流账：上一本被限流不该拖累这一本，
-            // 否则下载完一本被限流的书之后，后面每本都会以 1 线程爬。
-            Http.ResetThrottle();
+            if (ResetThrottleOnStart)
+                Http.ResetThrottle();
 
             // 封面：趁现在有详情页 URL 可以当 Referer（防盗链），落到书目录里，
             // 之后导出 EPUB 就不用再联网。失败不影响正文。
@@ -1049,7 +1051,7 @@ namespace TomatoBiquga
             try
             {
                 if (!File.Exists(path)) return false;
-                var bytes = File.ReadAllBytes(path);
+                var bytes = ReadFilePrefix(path, 16384);
                 int bom = (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) ? 3 : 0;
                 int scan = Math.Min(16384, bytes.Length - bom);
                 if (scan <= 0) return false;
@@ -1169,7 +1171,7 @@ namespace TomatoBiquga
             try
             {
                 if (!File.Exists(path)) return false;
-                var bytes = File.ReadAllBytes(path);
+                var bytes = ReadFilePrefix(path, 16384);
                 int bom = (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) ? 3 : 0;
                 int scan = Math.Min(16384, bytes.Length - bom);
                 if (scan <= 0) return false;
@@ -1219,6 +1221,27 @@ namespace TomatoBiquga
                 if (ok) return i;
             }
             return -1;
+        }
+
+        internal static byte[] ReadFilePrefix(string path, int maxBytes)
+        {
+            if (string.IsNullOrEmpty(path)) throw new ArgumentException("文件路径为空", "path");
+            if (maxBytes < 0) throw new ArgumentOutOfRangeException("maxBytes");
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete))
+            {
+                int length = (int)Math.Min(fs.Length, maxBytes);
+                var bytes = new byte[length];
+                int offset = 0;
+                while (offset < length)
+                {
+                    int read = fs.Read(bytes, offset, length - offset);
+                    if (read == 0) break;
+                    offset += read;
+                }
+                if (offset != length) Array.Resize(ref bytes, offset);
+                return bytes;
+            }
         }
 
 

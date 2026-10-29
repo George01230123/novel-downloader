@@ -145,25 +145,12 @@ namespace TomatoBiquga
             var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
-                // 探活期间不要被全局重试拖时间：临时把重试压到 1 次
-                int oldRetries = Http.MaxRetries;
-                int oldTimeout = Http.TimeoutSeconds;
-                try
+                var text = Http.GetWithTimeoutAndRetries(url, referer, timeoutSeconds, 1);
+                r.Ok = !string.IsNullOrEmpty(text);
+                if (!r.Ok)
                 {
-                    Http.MaxRetries = 1;
-                    Http.TimeoutSeconds = timeoutSeconds;
-                    var text = Http.Get(url, referer);
-                    r.Ok = !string.IsNullOrEmpty(text);
-                    if (!r.Ok)
-                    {
-                        r.Reason = "站点返回了空内容";
-                        r.Advice = "可能是临时故障，稍后重试。";
-                    }
-                }
-                finally
-                {
-                    Http.MaxRetries = oldRetries;
-                    Http.TimeoutSeconds = oldTimeout;
+                    r.Reason = "站点返回了空内容";
+                    r.Advice = "可能是临时故障，稍后重试。";
                 }
             }
             catch (Exception ex)

@@ -4915,6 +4915,7 @@ namespace TomatoBiquga
         {
             int n = keywords.Count;
             DateTime queueStarted = DateTime.MinValue;   // 队列总用时（进度条算 ETA 用）
+            Http.ResetThrottle();
             for (int i = 0; i < n; i++)
             {
                 if (canceled()) break;
@@ -5029,6 +5030,7 @@ namespace TomatoBiquga
                         Log = log,
                         RetryPasses = _settings.RetryPasses,
                         Workers = DownloadWorkersFor(_site),
+                        ResetThrottleOnStart = false,
                         OutputEncoding = CurrentFileEncoding(),
                         OutputTraditional = _settings.OutputTraditional,
                         AppendToExistingFile = append,
