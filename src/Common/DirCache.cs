@@ -169,7 +169,8 @@ namespace TomatoBiquga
 
                 var ser = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
                 var key = KeyFor(book);
-                File.WriteAllText(PathFor(book.Site, key), ser.Serialize(cb), new UTF8Encoding(false));
+                var path = PathFor(book.Site, key);
+                AtomicFile.WriteAllText(path, ser.Serialize(cb), new UTF8Encoding(false));
             }
             catch (Exception)
             {

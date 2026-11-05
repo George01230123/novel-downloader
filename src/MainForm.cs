@@ -2038,7 +2038,12 @@ namespace TomatoBiquga
         /// </summary>
         private int DownloadWorkersFor(ISite site)
         {
-            var prof = _profile ?? SiteProfileStore.Get(SiteKeyOf(site));
+            return DownloadWorkersFor(site, _profile);
+        }
+
+        private int DownloadWorkersFor(ISite site, SiteProfile profile)
+        {
+            var prof = profile ?? SiteProfileStore.Get(SiteKeyOf(site));
             if (prof != null && prof.Workers > 0) return prof.Workers;
             if (site is BiqugaSite) return _settings.BiqugaPcWorkers;
             if (site is BiqugaMobileSite)
@@ -2142,7 +2147,12 @@ namespace TomatoBiquga
         /// <summary>取当前站点该用的输出编码（站点配置里可指定 gbk）</summary>
         internal System.Text.Encoding CurrentFileEncoding()
         {
-            var prof = _profile ?? SiteProfileStore.Get(SiteKeyOf(_site));
+            return CurrentFileEncoding(_site, _profile);
+        }
+
+        private System.Text.Encoding CurrentFileEncoding(ISite site, SiteProfile profile)
+        {
+            var prof = profile ?? SiteProfileStore.Get(SiteKeyOf(site));
             return prof == null ? new System.Text.UTF8Encoding(true) : prof.FileEncoding();
         }
 
@@ -4771,6 +4781,14 @@ namespace TomatoBiquga
         /// </summary>
         internal void RunQueueFromDialog(string status, System.Collections.Generic.List<string> keywords)
         {
+            if (_busy) { BusyNotice("任务队列"); return; }
+            try { keywords = QueueInput.Bind(keywords, SiteKeyOf(_site)); }
+            catch (ArgumentException ex) { Log(ex.Message); return; }
+            if (!Bookshelf.SaveQueue(keywords))
+            {
+                Log("队列保存失败，请检查程序目录的写入权限和磁盘空间。");
+                return;
+            }
             var canceled = new Func<bool>(() => _cancel);
             RunBackground(status, () => RunQueue(keywords, Log, canceled));
         }
@@ -4913,17 +4931,57 @@ namespace TomatoBiquga
 
         private void RunQueue(System.Collections.Generic.List<string> keywords, Action<string> log, Func<bool> canceled)
         {
+            _queueConfirmAll = false;
             int n = keywords.Count;
             DateTime queueStarted = DateTime.MinValue;   // 队列总用时（进度条算 ETA 用）
+            var queueState = new System.Collections.Generic.List<Bookshelf.QueueItem>();
+            foreach (var raw in keywords)
+                queueState.Add(new Bookshelf.QueueItem
+                {
+                    Text = raw == null ? "" : raw.Trim(),
+                    Status = "pending",
+                });
+            SaveQueueProgress(queueState, log);
+
+            // 不改变主窗口选择：带前缀的行只在本行使用指定站点，下一行没有前缀时
+            // 仍回到用户原来选中的站点（包括自动选站在开始时算出的结果）。
+            var defaultSite = _site;
+            var defaultProfile = _profile ?? SiteProfileStore.Get(SiteKeyOf(defaultSite));
             Http.ResetThrottle();
+            try
+            {
             for (int i = 0; i < n; i++)
             {
                 if (canceled()) break;
-                var kw = keywords[i] == null ? "" : keywords[i].Trim();
+                var parsed = QueueInput.Parse(keywords[i]);
+                var kw = parsed.Keyword;
                 if (kw.Length == 0) continue;
+
+                queueState[i].Status = "running";
+                queueState[i].Error = "";
+                SaveQueueProgress(queueState, log);
 
                 try
                 {
+                ISite queueSite = defaultSite;
+                SiteProfile queueProfile = defaultProfile;
+                if (!string.IsNullOrEmpty(parsed.SiteKey))
+                {
+                    var d = SiteRegistry.ByKey(parsed.SiteKey);
+                    if (d != null && d.Factory != null)
+                    {
+                        queueSite = d.Factory();
+                        queueProfile = SiteProfileStore.Get(parsed.SiteKey);
+                        SiteProfileStore.Apply(queueProfile);
+                        log("  本行指定站点：「" + d.DisplayName + "」");
+                    }
+                }
+                else
+                {
+                    // 上一行可能应用过另一站点的 Cookie/代理/间隔，恢复默认站点配置。
+                    SiteProfileStore.Apply(queueProfile);
+                }
+
                     log(string.Format("===== 队列 [{0}/{1}]：{2} =====", i + 1, n, kw));
 
                     // 0) 可能是粘贴进来的地址（书架的追更走的就是这条路），
@@ -4931,7 +4989,13 @@ namespace TomatoBiquga
                     BookInfo target = null;
                     if (LooksLikeAddress(kw))
                     {
-                        target = FromAddress(kw);
+                        if (queueSite is RuleSite && LooksLikeBookAddress(kw))
+                        {
+                            string url = NormalizeBookUrl(kw);
+                            target = new BookInfo { Site = parsed.SiteKey, Url = url, Dir = RuleSite.PathOf(url) };
+                        }
+                        else target = FromAddress(kw);
+                        if (target != null && !string.IsNullOrEmpty(parsed.SiteKey)) target.Site = parsed.SiteKey;
                         if (target != null) log("  按地址直接载入：《" + target.Title + "》");
                     }
 
@@ -4945,13 +5009,15 @@ namespace TomatoBiquga
                     //   漏一本是看得见的失败，下错一本是看不见的失败。
                     if (target == null)
                     {
-                        var found = _site.Search(kw, log);
+                        var found = queueSite.Search(kw, log);
                         // 缓存命中时 Search 可能不写日志，这里补一句，免得日志里什么都没有
                         if (found != null && found.Count > 0)
                             log(string.Format("  搜索返回 {0} 条。", found.Count));
                         if (found == null || found.Count == 0)
                         {
                             log("  没搜到这本书，跳过。");
+                            queueState[i].Status = "failed";
+                            queueState[i].Error = "没有搜到这本书";
                             continue;
                         }
                         target = PickByTitle(found, kw);
@@ -4965,6 +5031,8 @@ namespace TomatoBiquga
                                     (string.IsNullOrEmpty(cand.Author) ? "" : "  作者：" + cand.Author));
                             }
                             log("    请把书名写全（或直接把书籍链接粘进队列）再跑一次。");
+                            queueState[i].Status = "failed";
+                            queueState[i].Error = "搜索结果无法精确匹配标题";
                             continue;
                         }
                         if (found.Count > 1)
@@ -4973,10 +5041,12 @@ namespace TomatoBiquga
 
                     // 2) 目录
                     if (canceled()) break;
-                    var book = _site.LoadBook(target, log);
+                    var book = queueSite.LoadBook(target, log);
                     if (book == null || book.Chapters == null || book.Chapters.Count == 0)
                     {
                         log("  目录为空，跳过。");
+                        queueState[i].Status = "failed";
+                        queueState[i].Error = "目录为空";
                         continue;
                     }
 
@@ -4985,7 +5055,7 @@ namespace TomatoBiquga
                     foreach (var c in book.Chapters)
                     {
                         if (c == null || c.IsVolume || string.IsNullOrEmpty(c.Id)) continue;
-                        if (string.IsNullOrEmpty(c.Text)) todo.Add(c);
+                        todo.Add(c);
                     }
 
                     string root = txtOutput.Text.Trim();
@@ -4998,6 +5068,7 @@ namespace TomatoBiquga
                     {
                         log("  已经是最新的，没有新章节。");
                         RememberInShelf(book, txtPath, false);
+                        queueState[i].Status = "done";
                         continue;
                     }
                     if (todo.Count == 0) todo.AddRange(book.Chapters);
@@ -5014,24 +5085,27 @@ namespace TomatoBiquga
                         if (stopQueue)
                         {
                             log("  用户选择停止队列，后面的书不再处理。");
+                            queueState[i].Status = "pending";
                             break;
                         }
                         log("  用户跳过这本。");
+                        queueState[i].Status = "skipped";
+                        queueState[i].Error = "用户跳过";
                         continue;
                     }
 
                     // 4) 下载
                     var runner = new DownloadRunner
                     {
-                        Site = _site,
+                        Site = queueSite,
                         Book = book,
                         Chapters = todo,
                         RootDir = root,
                         Log = log,
                         RetryPasses = _settings.RetryPasses,
-                        Workers = DownloadWorkersFor(_site),
+                        Workers = DownloadWorkersFor(queueSite, queueProfile),
                         ResetThrottleOnStart = false,
-                        OutputEncoding = CurrentFileEncoding(),
+                        OutputEncoding = CurrentFileEncoding(queueSite, queueProfile),
                         OutputTraditional = _settings.OutputTraditional,
                         AppendToExistingFile = append,
                         IsCanceled = canceled,
@@ -5056,17 +5130,55 @@ namespace TomatoBiquga
                     };
                     if (queueStarted == DateTime.MinValue) queueStarted = DateTime.Now;   // 第一次真正开跑才计时
                     runner.Run();
+                    if (canceled())
+                    {
+                        queueState[i].Status = "pending";
+                        break;
+                    }
                     log(string.Format("  完成：成功 {0} 章，跳过 {1} 章，失败 {2} 章",
                         runner.Ok, runner.Skipped, runner.Failed));
                     if (!string.IsNullOrEmpty(runner.OutputFile)) RememberInShelf(book, runner.OutputFile, true);
+                    queueState[i].Status = runner.Failed > 0 || runner.Skipped > 0 ? "failed" : "done";
+                    queueState[i].Error = queueState[i].Status == "failed" ? (runner.ReportFile ?? "有缺失章节") : "";
                 }
                 catch (Exception ex)
                 {
                     // 单本失败继续下一本：这是队列的核心价值，不能因为一本就整体中断
                     log(string.Format("  这本书失败，继续下一本：{0}", ex.Message));
+                    queueState[i].Status = canceled() ? "pending" : "failed";
+                    queueState[i].Error = ex.Message;
+                }
+                finally
+                {
+                    if (queueState[i].Status == "running") queueState[i].Status = "pending";
+                    SaveQueueProgress(queueState, log);
                 }
             }
+            bool retryable = false;
+            foreach (var item in queueState)
+                if (item != null && (item.Status == "pending" || item.Status == "running" || item.Status == "failed"))
+                {
+                    retryable = true;
+                    break;
+                }
+            if (!retryable)
+            {
+                SaveQueueProgress(null, log);
+            }
+            }
+            finally
+            {
+            // 队列结束后恢复主窗口当前站点的连接参数，避免下一次手动下载沿用队列最后一行的 Cookie/代理。
+                SiteProfileStore.Apply(defaultProfile);
+            }
             log("===== 队列结束 =====");
+        }
+
+        private static void SaveQueueProgress(List<Bookshelf.QueueItem> items, Action<string> log)
+        {
+            if (Bookshelf.SaveQueueState(items)) return;
+            log("队列进度保存失败，已停止队列；请检查磁盘空间或目录权限后再继续。");
+            throw new IOException("无法保存队列进度。");
         }
     }
 
@@ -5293,23 +5405,18 @@ namespace TomatoBiquga
                 return;
             }
 
-            // 站点前缀：允许「番茄：书名」「biquga：书名」覆盖主窗口的选择。
-            // 做法是先切主窗口的站点下拉框，这样 RunQueue 里用的 _site 就是对的。
-            var first = kw[0];
-            int sep = first.IndexOf(':');
-            if (sep < 0) sep = first.IndexOf('：');
-            if (sep > 0)
-            {
-                var prefix = first.Substring(0, sep).Trim();
-                int idx = SiteIndexForPrefix(prefix);
-                if (idx >= 0) _owner.SelectSiteForTest(idx);
-            }
-
             _run.Enabled = false;
             _running = true;
             _submitted = true;      // 先打标记再 Close()，否则 FormClosing 会把队列当场取消
-            // 队列开始跑之后就把文件清掉：否则下次打开队列窗口会又看到一份已经下完的清单
-            try { Bookshelf.SaveQueue(null); } catch { }
+            // 队列开始后保留每项状态；程序崩溃或用户取消时可以从未完成项继续。
+            try
+            {
+                var state = new System.Collections.Generic.List<Bookshelf.QueueItem>();
+                foreach (var item in kw)
+                    state.Add(new Bookshelf.QueueItem { Text = item, Status = "pending" });
+                Bookshelf.SaveQueueState(state);
+            }
+            catch { }
             _hint.Text = "正在排队下载…… 关闭本窗口会请求停止（当前这本下完就停）。";
             Close();
 
@@ -5318,27 +5425,6 @@ namespace TomatoBiquga
             _owner.BeginInvoke(new Action(() => _owner.RunQueueFromDialog("队列下载中…", kw)));
         }
 
-        private static int SiteIndexForPrefix(string prefix)
-        {
-            if (string.IsNullOrEmpty(prefix)) return -1;
-            var p = prefix.Trim().ToLowerInvariant();
-
-            // 中文别名（"番茄" / "笔趣阁" 这种用户真会写的）
-            if (p == "番茄" || p == "fanqie" || p == "tomato") return SiteRegistry.IndexOf("fanqie");
-            if (p == "移动版" || p == "biquga-m") return SiteRegistry.IndexOf("biquga-m");
-            if (p == "pc" || p == "pc版" || p == "biquga-pc") return SiteRegistry.IndexOf("biquga");
-            if (p == "笔趣阁") return SiteRegistry.IndexOf("biquga");
-
-            // 其余按注册表里的 Key 或显示名精确匹配 ——
-            // 这样队列里写 "笔尖中文" 或 "xbiquwk" 都能切过去，加站点不用改这里。
-            int byKey = SiteRegistry.IndexOf(prefix.Trim());
-            if (byKey >= 0) return byKey;
-            var all = SiteRegistry.All;
-            for (int i = 0; i < all.Count; i++)
-                if (string.Equals(all[i].DisplayName, prefix.Trim(), StringComparison.OrdinalIgnoreCase))
-                    return i;
-            return -1;
-        }
     }
 
     /// <summary>

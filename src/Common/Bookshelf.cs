@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Web.Script.Serialization;
 
 namespace TomatoBiquga
 {
@@ -55,6 +56,14 @@ namespace TomatoBiquga
                     Title, string.IsNullOrEmpty(Author) ? "未知" : Author, Site, LastChapterCount,
                     LastDownload == DateTime.MinValue ? "从未下载" : LastDownload.ToString("yyyy-MM-dd HH:mm"));
             }
+        }
+
+        /// <summary>任务队列的一条可恢复状态。</summary>
+        public class QueueItem
+        {
+            public string Text = "";
+            public string Status = "pending"; // pending / running / done / skipped / failed
+            public string Error = "";
         }
 
         public readonly List<Entry> Entries = new List<Entry>();
@@ -179,10 +188,7 @@ namespace TomatoBiquga
                 }
                 sb.Append("  ]\n}\n");
 
-                var tmp = path + ".tmp";
-                File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
-                if (File.Exists(path)) File.Delete(path);
-                File.Move(tmp, path);
+                AtomicFile.WriteAllText(path, sb.ToString(), new UTF8Encoding(true));
                 return true;
             }
             catch { return false; }
@@ -383,29 +389,49 @@ namespace TomatoBiquga
 
         public static bool SaveQueue(string path, List<string> lines)
         {
+            var items = new List<QueueItem>();
+            if (lines != null)
+                foreach (var line in lines)
+                    if (!string.IsNullOrWhiteSpace(line))
+                        items.Add(new QueueItem { Text = line.Trim(), Status = "pending" });
+            return SaveQueueState(path, items);
+        }
+
+        /// <summary>
+        /// 保存带状态的队列。写临时文件后再替换目标，崩溃时不会留下半份 JSON。
+        /// </summary>
+        public static bool SaveQueueState(List<QueueItem> items)
+        {
+            return SaveQueueState(QueuePath, items);
+        }
+
+        public static bool SaveQueueState(string path, List<QueueItem> items)
+        {
             try
             {
-                if (lines == null || lines.Count == 0)
+                if (items == null || items.Count == 0)
                 {
                     if (File.Exists(path)) File.Delete(path);
                     return true;
                 }
                 var sb = new StringBuilder();
-                sb.Append("{\n  \"note\": \"任务队列（每项一行）。程序关闭时会自动写这里，下次打开队列窗口自动带回。\",\n");
+                sb.Append("{\n  \"version\": 2,\n  \"note\": \"任务队列（带可恢复状态）。\",\n");
                 sb.Append("  \"savedAt\": ").Append(J(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))).Append(",\n");
                 sb.Append("  \"items\": [\n");
-                for (int i = 0; i < lines.Count; i++)
+                for (int i = 0; i < items.Count; i++)
                 {
-                    sb.Append("    ").Append(J(lines[i]));
-                    if (i < lines.Count - 1) sb.Append(',');
+                    var item = items[i] ?? new QueueItem();
+                    var status = NormalizeQueueStatus(item.Status);
+                    sb.Append("    {\"text\": ").Append(J(item.Text));
+                    sb.Append(", \"status\": ").Append(J(status));
+                    if (!string.IsNullOrEmpty(item.Error)) sb.Append(", \"error\": ").Append(J(item.Error));
+                    sb.Append("}");
+                    if (i < items.Count - 1) sb.Append(',');
                     sb.Append('\n');
                 }
                 sb.Append("  ]\n}\n");
 
-                var tmp = path + ".tmp";
-                File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
-                if (File.Exists(path)) File.Delete(path);
-                File.Move(tmp, path);
+                AtomicFile.WriteAllText(path, sb.ToString(), new UTF8Encoding(true));
                 return true;
             }
             catch { return false; }
@@ -420,35 +446,60 @@ namespace TomatoBiquga
         public static List<string> LoadQueue(string path)
         {
             var list = new List<string>();
+            foreach (var item in LoadQueueState(path))
+            {
+                if (item == null || string.IsNullOrEmpty(item.Text)) continue;
+                if (item.Status == "done" || item.Status == "skipped") continue;
+                list.Add(item.Text);
+            }
+            return list;
+        }
+
+        /// <summary>读带状态队列；旧版字符串数组按 pending 解释。</summary>
+        public static List<QueueItem> LoadQueueState()
+        {
+            return LoadQueueState(QueuePath);
+        }
+
+        public static List<QueueItem> LoadQueueState(string path)
+        {
+            var list = new List<QueueItem>();
             try
             {
                 if (string.IsNullOrEmpty(path) || !File.Exists(path)) return list;
-                var text = ReadAllTextShared(path);
-                int at = text.IndexOf("\"items\"", StringComparison.Ordinal);
-                if (at < 0) return list;
-                int arr = text.IndexOf('[', at);
-                if (arr < 0) return list;
-
-                // 提取数组里的每个字符串（复用 SkipString/Unescape，不引解析器）
-                int i = arr + 1;
-                while (i < text.Length)
+                var serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+                var root = serializer.DeserializeObject(ReadAllTextShared(path)) as Dictionary<string, object>;
+                object value;
+                if (root == null || !root.TryGetValue("items", out value)) return list;
+                var entries = value as object[];
+                if (entries == null) return list;
+                foreach (var entry in entries)
                 {
-                    char c = text[i];
-                    if (c == ']') break;
-                    if (c == '"')
+                    var item = new QueueItem();
+                    var legacy = entry as string;
+                    if (legacy != null) item.Text = legacy.Trim();
+                    else
                     {
-                        int end = SkipString(text, i);
-                        var raw = text.Substring(i + 1, Math.Max(0, end - i - 2));
-                        var s = Unescape(raw).Trim();
-                        if (s.Length > 0) list.Add(s);
-                        i = end;
-                        continue;
+                        var obj = entry as Dictionary<string, object>;
+                        if (obj == null) continue;
+                        item.Text = obj.TryGetValue("text", out value) ? (value as string ?? "").Trim() : "";
+                        item.Status = NormalizeQueueStatus(obj.TryGetValue("status", out value) ? value as string : null);
+                        item.Error = obj.TryGetValue("error", out value) ? value as string ?? "" : "";
                     }
-                    i++;
+                    if (item.Text.Length > 0) list.Add(item);
                 }
             }
             catch { /* 队列文件坏了就当空的，绝不因此起不来 */ }
             return list;
+        }
+
+        private static string NormalizeQueueStatus(string status)
+        {
+            if (string.Equals(status, "running", StringComparison.OrdinalIgnoreCase)) return "running";
+            if (string.Equals(status, "done", StringComparison.OrdinalIgnoreCase)) return "done";
+            if (string.Equals(status, "skipped", StringComparison.OrdinalIgnoreCase)) return "skipped";
+            if (string.Equals(status, "failed", StringComparison.OrdinalIgnoreCase)) return "failed";
+            return "pending";
         }
 
         /// <summary>共享读（队列文件可能正被写）</summary>

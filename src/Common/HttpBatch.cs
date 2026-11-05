@@ -71,6 +71,7 @@ namespace TomatoBiquga
         /// </summary>
         public static Dictionary<string, string> Fetch(string[] urls, string referer)
         {
+            Http.Cancellation.ThrowIfCancellationRequested();
             var map = new Dictionary<string, string>();
             if (urls == null || urls.Length == 0) return map;
 
@@ -171,6 +172,7 @@ namespace TomatoBiquga
         /// <summary>跑 curl 并拿回 stdout（stderr 丢弃，失败返回 null）</summary>
         private static string RunCurl(string curlPath, string args)
         {
+            Http.Cancellation.ThrowIfCancellationRequested();
             var psi = new ProcessStartInfo(curlPath, args)
             {
                 UseShellExecute = false,
@@ -180,6 +182,7 @@ namespace TomatoBiquga
                 StandardOutputEncoding = Encoding.UTF8,
             };
             using (var p = Process.Start(psi))
+            using (Http.CancelProcess(p))
             {
                 // ★ 必须先读 stdout 再 WaitForExit：反过来的话输出量大时管道写满会死锁
                 string stdout = p.StandardOutput.ReadToEnd();
@@ -191,6 +194,7 @@ namespace TomatoBiquga
                     try { p.Kill(); } catch { }
                     return null;
                 }
+                Http.Cancellation.ThrowIfCancellationRequested();
                 return p.ExitCode == 0 ? stdout : null;
             }
         }

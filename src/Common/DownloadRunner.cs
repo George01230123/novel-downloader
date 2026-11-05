@@ -60,6 +60,8 @@ namespace TomatoBiquga
         /// <summary>默认每次单本下载重置限流状态；队列内由队列统一管理状态</summary>
         public bool ResetThrottleOnStart = true;
 
+        private CancellationTokenSource _fetchCancellation;
+
         // 增量写盘用：攒够一批就 append，避免每次都重写整个文件
         private StringBuilder _pending = new StringBuilder();
         private bool _headerWritten;
@@ -171,6 +173,16 @@ namespace TomatoBiquga
         {
             if (Site == null || Book == null || Chapters == null) throw new Exception("下载器没有初始化");
             if (Chapters.Count == 0) throw new Exception("没有选中任何章节");
+            _fetchCancellation = new CancellationTokenSource();
+            var cancellation = _fetchCancellation;
+            var previousCancellation = Http.Cancellation;
+            Http.Cancellation = cancellation.Token;
+            var cancelTimer = new Timer(delegate
+            {
+                try { if (IsCanceled()) cancellation.Cancel(); }
+                catch (ObjectDisposedException) { }
+            }, null, 0, 50);
+            FetchPipeline pipeline = null;
             // ★ 下载期间**别让系统睡着**：用户挂一夜，机器进睡眠 = 网络断 = "下载停了"。
             //   成对调用；即使这里之后抛异常，Run 跑在后台线程上，线程结束时系统也会自动清掉这个标记。
             AppPower.KeepAwakeBegin();
@@ -219,6 +231,7 @@ namespace TomatoBiquga
             _pending.Length = 0;
             _headerWritten = false;
             _appendedBytes = 0;
+            lock (_batchLock) { _batchText.Clear(); _batchCursor = 0; _batchInFlight = 0; }
             int total = Chapters.Count;
 
             // 更新已有文件：记住它原来的大小，并准备"文件里已经有哪些章"的索引。
@@ -245,7 +258,7 @@ namespace TomatoBiquga
 
             // 并发抓取流水线：Workers > 1 时把"取正文"并发起来。
             // 注意默认 Workers = 1（串行），所以自测/脚本路径与改动前完全一致。
-            var pipeline = (Workers > 1 && total > 1) ? new FetchPipeline(this, total) : null;
+            pipeline = (Workers > 1 && total > 1) ? new FetchPipeline(this, total) : null;
             if (pipeline != null)
                 Log(string.Format("并发下载：{0} 线程抓取正文，按目录顺序落盘（站点限流时会自动降并发）。", Workers));
 
@@ -260,6 +273,7 @@ namespace TomatoBiquga
                 OnProgress(i, total);
                 if (pipeline != null) pipeline.WaitAndCommit(i);
                 else FetchInto(c);
+                if (IsCanceled()) break;
                 OnProgress(i + 1, total);
 
                 // 每 20 章把新增内容追加到文件（append 而不是重写整个文件，
@@ -295,7 +309,7 @@ namespace TomatoBiquga
                         if (!string.IsNullOrEmpty(c.Text)) { c.Text = ""; continue; }   // 重试成功
                         still.Add(c);
                     }
-                    FlushIncremental();
+                    if (_pending.Length > 0) FlushIncremental();
                     retryList = still;
                     if (retryList.Count == 0) { Log("重试后已无失败章节。"); break; }
                     Log(string.Format("重试第 {0} 轮结束，仍有 {1} 章失败。", pass, retryList.Count));
@@ -338,9 +352,26 @@ namespace TomatoBiquga
             }
             finally
             {
+                // Do not release shared HTTP state until every worker has stopped.
+                try
+                {
+                    cancellation.Cancel();
+                    if (pipeline != null) pipeline.Stop();
+                    if (_pending.Length > 0) FlushIncremental();
+                }
+                finally
+                {
+                    using (var stopped = new ManualResetEvent(false))
+                    {
+                        if (cancelTimer.Dispose(stopped)) stopped.WaitOne();
+                    }
+                    cancellation.Dispose();
+                    _fetchCancellation = null;
+                    Http.Cancellation = previousCancellation;
                 // 恢复系统默认电源行为 + 摘掉回调用（见上面 try 的注释）
                 AppPower.KeepAwakeEnd();
                 Http.SlowRequestLogger = null;
+                }
             }
         }
 
@@ -453,6 +484,7 @@ namespace TomatoBiquga
             Exception err = null;
             try { f = FetchTextOnly(c); }
             catch (Exception ex) { err = ex; }
+            if (IsCanceled()) return;
             Commit(c, f, err, isRetry);
         }
 
@@ -461,6 +493,14 @@ namespace TomatoBiquga
         {
             public string Text;
             public bool FromCache;
+            public bool AlreadyDownloaded;
+        }
+
+        private bool AlreadyDownloaded(ChapterInfo chapter)
+        {
+            ChapterSpan span;
+            return _replaceMissing && chapter != null && !string.IsNullOrEmpty(chapter.Id) &&
+                _existing.TryGetValue(chapter.Id, out span) && span != null && span.HasBody;
         }
 
         /// <summary>
@@ -469,6 +509,12 @@ namespace TomatoBiquga
         /// </summary>
         private Fetched FetchTextOnly(ChapterInfo c)
         {
+            var previous = Http.Cancellation;
+            Http.Cancellation = _fetchCancellation.Token;
+            try
+            {
+            Http.Cancellation.ThrowIfCancellationRequested();
+            if (AlreadyDownloaded(c)) return new Fetched { AlreadyDownloaded = true };
             var f = new Fetched();
             // 目录遍历时顺手抓到的正文（biquga 会把整本正文缓存下来），这里直接用
             var text = c.Text;
@@ -485,13 +531,20 @@ namespace TomatoBiquga
                 if (string.IsNullOrEmpty(text)) PrefetchBatch();
             }
             if (!string.IsNullOrEmpty(text)) f.FromCache = true;
-            else text = Site.LoadChapter(Book, c, null);
+            else
+            {
+                Http.Cancellation.ThrowIfCancellationRequested();
+                text = Site.LoadChapter(Book, c, null);
+            }
 
             // 繁简转换（可选）：放在这里而不是落盘前，是因为**内存里的正文也要跟着转** ——
             // 「导出 EPUB / Markdown」直接用 c.Text，如果只在写 txt 时转，
             // 就会出现「txt 是繁体、epub 是简体」这种自相矛盾的结果。
             f.Text = ApplyScript(text);
+            Http.Cancellation.ThrowIfCancellationRequested();
             return f;
+            }
+            finally { Http.Cancellation = previous; }
         }
 
         /// <summary>
@@ -626,6 +679,7 @@ namespace TomatoBiquga
                     {
                         var ch = Chapters[i];
                         if (ch == null || string.IsNullOrEmpty(ch.Id)) continue;
+                        if (AlreadyDownloaded(ch)) continue;
                         if (_batchText.ContainsKey(ch.Id)) continue;
                         var u = urlProvider.ChapterUrlFor(Book, ch);
                         if (string.IsNullOrEmpty(u)) continue;
@@ -707,6 +761,7 @@ namespace TomatoBiquga
         /// </summary>
         private void Commit(ChapterInfo c, Fetched f, Exception err, bool isRetry)
         {
+            if (f != null && f.AlreadyDownloaded) { SkippedDownloaded++; return; }
             string prefix = isRetry ? "[重试] " : "";
             if (err != null)
             {
@@ -800,6 +855,8 @@ namespace TomatoBiquga
             private int _inFlight;
             private int _lastWindow;                    // 上一次的自适应并发（用于"变化时记一行"）
             private bool _stopped;
+            private readonly List<Task> _tasks = new List<Task>();
+            private bool _disposed;
 
             public FetchPipeline(DownloadRunner owner, int total)
             {
@@ -832,20 +889,26 @@ namespace TomatoBiquga
                     }
                     _lastWindow = window;
                 }
-                while (!_stopped && _next < _total && Volatile.Read(ref _inFlight) < window)
+                _tasks.RemoveAll(task => task.IsCompleted);
+                while (!_stopped && !_owner.IsCanceled() && _next < _total && Volatile.Read(ref _inFlight) < window)
                 {
                     int idx = _next++;
                     var chapter = _owner.Chapters[idx];
                     Interlocked.Increment(ref _inFlight);
-                    Task.Run(() =>
+                    var task = Task.Run(() =>
                     {
                         var o = new Outcome();
-                        try { o.Result = _owner.FetchTextOnly(chapter); }
+                        try
+                        {
+                            if (!_owner.IsCanceled()) o.Result = _owner.FetchTextOnly(chapter);
+                            else o.Error = new OperationCanceledException();
+                        }
                         catch (Exception ex) { o.Error = ex; }
                         _outcomes[idx] = o;
                         Interlocked.Decrement(ref _inFlight);
                         try { _ready[idx].Set(); } catch { }
                     });
+                    _tasks.Add(task);
                 }
             }
 
@@ -863,13 +926,20 @@ namespace TomatoBiquga
                     _ready[i].Wait(50);
                 }
                 var o = _outcomes[i];
+                if (_owner.IsCanceled()) return;
                 _owner.Commit(_owner.Chapters[i], o.Result, o.Error, false);
             }
 
             /// <summary>下载循环结束（或取消）时调用：不再提交新的抓取</summary>
             public void Stop()
             {
+                if (_disposed) return;
                 _stopped = true;
+                if (_owner.IsCanceled()) _owner._fetchCancellation.Cancel();
+                Task.WaitAll(_tasks.ToArray());
+                foreach (var ready in _ready) ready.Dispose();
+                _tasks.Clear();
+                _disposed = true;
             }
         }
 

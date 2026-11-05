@@ -20,6 +20,27 @@ namespace TomatoBiquga
     /// </summary>
     public static class Http
     {
+        private static readonly AsyncLocal<CancellationToken> RequestCancellation = new AsyncLocal<CancellationToken>();
+        internal static CancellationToken Cancellation
+        {
+            get { return RequestCancellation.Value; }
+            set { RequestCancellation.Value = value; }
+        }
+
+        internal static void WaitCancelable(int milliseconds)
+        {
+            var token = Cancellation;
+            if (!token.CanBeCanceled) { Thread.Sleep(milliseconds); return; }
+            if (token.WaitHandle.WaitOne(milliseconds)) token.ThrowIfCancellationRequested();
+        }
+
+        internal static CancellationTokenRegistration CancelProcess(Process process)
+        {
+            return Cancellation.Register(delegate
+            {
+                try { if (!process.HasExited) process.Kill(); } catch (Exception) { }
+            });
+        }
         public static string UserAgent =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -545,6 +566,7 @@ namespace TomatoBiquga
         private static string Request(string url, string body, string referer,
             int timeoutSeconds = 0, int maxRetries = 0)
         {
+            Cancellation.ThrowIfCancellationRequested();
             // ★ 回放优先：命中就直接用录好的响应，**一个字节都不联网**。
             //   放在重试循环外面：回放要么命中（成功返回），要么未命中（继续联网）。
             //   未命中在宽松模式下**不抛错**，落到下面的真实请求 ——
@@ -566,6 +588,7 @@ namespace TomatoBiquga
             Exception last = null;
             for (int attempt = 0; attempt < requestRetries; attempt++)
             {
+                Cancellation.ThrowIfCancellationRequested();
                 try
                 {
                     // ★ 每轮开始先把状态码清成"未知"。
@@ -614,6 +637,7 @@ namespace TomatoBiquga
                         throw new ThrottledException(string.Format("站点限流（正文特征是「{0}」）", FirstMarker(text)));
                     }
 
+                    Cancellation.ThrowIfCancellationRequested();
                     NoteSuccess();
                     // 录制（只在 RecordDir 非空时生效；失败静默忽略）
                     SaveRecordText(body == null ? "GET" : "POST", url, body, text);
@@ -621,6 +645,7 @@ namespace TomatoBiquga
                 }
                 catch (Exception ex)
                 {
+                    Cancellation.ThrowIfCancellationRequested();
                     last = ex;
                     // curl 失败时尝试原生后端（限流不适用：换后端解决不了限流）
                     //
@@ -640,6 +665,7 @@ namespace TomatoBiquga
                         }
                         catch (Exception ex2)
                         {
+                            Cancellation.ThrowIfCancellationRequested();
                             // ★ 这里必须**保留原来的 curl 错误**，不能只用 ex2 覆盖。
                             // curl 的失败原因是有诊断价值的（退出码 → TLS/DNS/超时），
                             // 而 .NET 回退失败往往只是一句笼统的"连接被意外关闭"。
@@ -843,7 +869,7 @@ namespace TomatoBiquga
             }
             // 抖动：避免多个并发线程退避后同时回来（惊群）
             ms += NextRandom((int)Math.Max(1, ms / 4));
-            Thread.Sleep((int)Math.Min(ms, int.MaxValue));
+            WaitCancelable((int)Math.Min(ms, int.MaxValue));
         }
 
         /// <summary>
@@ -996,6 +1022,7 @@ namespace TomatoBiquga
             string userAgent = null, string accept = null,
             Dictionary<string, string> extraHeaders = null, int timeoutSeconds = 0)
         {
+            Cancellation.ThrowIfCancellationRequested();
             int timeout = timeoutSeconds > 0 ? timeoutSeconds : TimeoutSeconds;
             var tmp = Path.Combine(Path.GetTempPath(), "tb_" + Guid.NewGuid().ToString("N") + ".html");
             try
@@ -1064,6 +1091,7 @@ namespace TomatoBiquga
                 };
                 string stdout;
                 using (var p = Process.Start(psi))
+                using (CancelProcess(p))
                 {
                     stdout = p.StandardOutput.ReadToEnd();
                     var err = p.StandardError.ReadToEnd();
@@ -1072,6 +1100,7 @@ namespace TomatoBiquga
                         try { p.Kill(); } catch { }
                         throw new Exception("curl 超时");
                     }
+                    Cancellation.ThrowIfCancellationRequested();
                     if (p.ExitCode != 0)
                         throw CurlFailure(p.ExitCode, err);
                 }
@@ -1146,6 +1175,7 @@ namespace TomatoBiquga
             string userAgent = null, string accept = null,
             Dictionary<string, string> extraHeaders = null, int timeoutSeconds = 0)
         {
+            Cancellation.ThrowIfCancellationRequested();
             int timeout = timeoutSeconds > 0 ? timeoutSeconds : TimeoutSeconds;
             RequestStatusCode = 0;
             var req = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(url);
@@ -1190,6 +1220,9 @@ namespace TomatoBiquga
                 if (pu != null) req.Proxy = new System.Net.WebProxy(pu);
             }
 
+            using (Cancellation.Register(req.Abort))
+            {
+            Cancellation.ThrowIfCancellationRequested();
             if (body != null)
             {
                 var b = Encoding.UTF8.GetBytes(body);
@@ -1218,6 +1251,7 @@ namespace TomatoBiquga
                 var hr = we.Response as System.Net.HttpWebResponse;
                 if (hr != null) RequestStatusCode = (int)hr.StatusCode;
                 throw;
+            }
             }
         }
 
@@ -1271,7 +1305,7 @@ namespace TomatoBiquga
 
         public static void Polite()
         {
-            Thread.Sleep(MinDelayMs + NextRandom(Math.Max(1, MaxDelayMs - MinDelayMs)));
+            WaitCancelable(MinDelayMs + NextRandom(Math.Max(1, MaxDelayMs - MinDelayMs)));
         }
 
         // ---------------------------------------------------------- HTML 工具
