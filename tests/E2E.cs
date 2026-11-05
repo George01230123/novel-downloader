@@ -85,6 +85,7 @@ internal static class E2E
             TestFullExportPipeline(work);
             TestShelfIntegration(work);
             TestDialogs(work);
+            TestRequestCancellation();
         }
         catch (Exception ex)
         {
@@ -119,6 +120,60 @@ internal static class E2E
     }
 
     // ---------------------------------------------------------------- 1) 规模
+
+    private static void TestRequestCancellation()
+    {
+        Console.WriteLine("[5] 请求取消（仅使用本机回环地址）");
+        string oldProxy = Http.Proxy;
+        Http.Proxy = "";
+        try
+        {
+            foreach (string backend in new[] { "curl", "dotnet", "batch" })
+            {
+                if (backend != "dotnet" && !Http.CurlAvailable) continue;
+                var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+                listener.Start();
+                using (var cancel = new System.Threading.CancellationTokenSource())
+                {
+                    var accept = listener.AcceptTcpClientAsync();
+                    string url = "http://127.0.0.1:" + ((System.Net.IPEndPoint)listener.LocalEndpoint).Port + "/chapter";
+                    var request = System.Threading.Tasks.Task.Run(delegate
+                    {
+                        Http.Cancellation = cancel.Token;
+                        try
+                        {
+                            if (backend == "batch") HttpBatch.Fetch(new[] { url, url + "2" }, null);
+                            else if (backend == "curl") Http.Get(url);
+                            else
+                            {
+                                var method = typeof(Http).GetMethod("FetchWithDotNet", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                                method.Invoke(null, new object[] { url, null, null, null, null, null, 15 });
+                            }
+                        }
+                        catch (Exception) { }
+                        finally { Http.Cancellation = System.Threading.CancellationToken.None; }
+                    });
+                    System.Net.Sockets.TcpClient client = null;
+                    try
+                    {
+                        bool connected = accept.Wait(5000);
+                        Check("取消：请求确实连接 " + backend, connected);
+                        if (connected) client = accept.Result;
+                        cancel.Cancel();
+                        Check("取消：无需等待站点超时 " + backend, request.Wait(3000));
+                    }
+                    finally
+                    {
+                        cancel.Cancel();
+                        if (client != null) client.Dispose();
+                        listener.Stop();
+                        request.Wait();
+                    }
+                }
+            }
+        }
+        finally { Http.Proxy = oldProxy; }
+    }
 
     /// <summary>繁简转换在"一本千万字级"的正文上不能慢到不可用（O(n) 验证）</summary>
     private static void TestScaleConverter()

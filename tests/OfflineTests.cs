@@ -354,6 +354,8 @@ namespace TomatoBiquga
                 TestNetDiag();
                 // 任务队列持久化
                 TestQueuePersistence(work);
+                // 队列每行的站点前缀必须独立解析
+                TestQueueInputParsing();
                 // 目录遍历断点续爬
                 TestCrawlResume();
                 // 增量：已下载的章节重下时不再联网
@@ -631,6 +633,7 @@ namespace TomatoBiquga
                 // 注意 OfflineTests 的 Check 只有两个参数（名字 + 条件），
                 // 详情要拼进名字里 —— 加了个第三参数会直接编译不过（踩过一次）。
                 Check("缓存往返：文件已写出（" + path + "）", File.Exists(path));
+                Check("缓存往返：写完不留下临时文件", !File.Exists(path + ".tmp"));
 
                 var back = DirCache.Load(site, key);
                 Check("缓存往返：能读回来", back != null);
@@ -1581,6 +1584,20 @@ namespace TomatoBiquga
                 par.ReportFile != null && File.ReadAllText(par.ReportFile, Encoding.UTF8).Contains("标题5"));
             Check("并发：缺失报告里也写了跳过章",
                 par.ReportFile != null && File.ReadAllText(par.ReportFile, Encoding.UTF8).Contains("标题9"));
+
+            var resumedSite = new CountingSite();
+            var resumedChapters = new List<ChapterInfo>();
+            foreach (var chapter in chapters)
+                resumedChapters.Add(new ChapterInfo { Id = chapter.Id, Title = chapter.Title, Order = chapter.Order });
+            var resumed = new DownloadRunner
+            {
+                Site = resumedSite, Book = book, Chapters = resumedChapters,
+                RootDir = Path.Combine(dir, "parallel"), Workers = 4, RetryPasses = 0,
+                AppendToExistingFile = true,
+            };
+            resumed.Run();
+            Eq("并发续传：只请求原来缺失的两章", 2, resumedSite.LoadCalls);
+            Eq("并发续传：跳过已经落盘的十章", 10, resumed.SkippedDownloaded);
         }
 
         /// <summary>
@@ -2885,6 +2902,67 @@ namespace TomatoBiquga
 
             // ---------- 下载抛异常时，电源/日志回调必须被清理 ----------
             TestRunnerCleanupOnException();
+
+            // ---------- 并发队列取消必须等待已提交抓取任务 ----------
+            TestRunnerCancellationWaits();
+        }
+
+        private static void TestRunnerCancellationWaits()
+        {
+            foreach (bool failProgress in new[] { false, true })
+            {
+                var site = new ShutdownSite();
+                var book = new BookInfo { Title = "shutdown", Site = "biquga" };
+                for (int i = 0; i < 6; i++) book.Chapters.Add(new ChapterInfo { Id = i.ToString(), Title = "chapter " + i });
+                bool cancel = false;
+                var runner = new DownloadRunner
+                {
+                    Site = site, Book = book, Chapters = book.Chapters,
+                    RootDir = MakeCaseDir("shutdown"), Workers = 3, RetryPasses = 0,
+                    IsCanceled = () => cancel,
+                    OnProgress = (done, total) =>
+                    {
+                        if (done == 1)
+                        {
+                            if (failProgress) throw new InvalidOperationException("progress failure");
+                            cancel = true;
+                        }
+                    },
+                };
+                bool threw = false;
+                try { runner.Run(); } catch (InvalidOperationException) { threw = true; }
+                int activeAtReturn = System.Threading.Volatile.Read(ref site.Active);
+                site.Finished.Wait(5000);
+                Eq("收口：异常仅来自进度回调 " + failProgress, failProgress, threw);
+                Eq("收口：返回时没有后台抓取 " + failProgress, 0, activeAtReturn);
+                Check("收口：不会继续提交后续章节 " + failProgress, site.Calls <= 3);
+            }
+        }
+
+        private sealed class ShutdownSite : ISite
+        {
+            public int Active, Calls;
+            public readonly System.Threading.CountdownEvent Started = new System.Threading.CountdownEvent(3);
+            public readonly System.Threading.ManualResetEventSlim Finished = new System.Threading.ManualResetEventSlim(false);
+            public string Name { get { return "shutdown"; } }
+            public List<BookInfo> Search(string keyword, Action<string> log) { return new List<BookInfo>(); }
+            public BookInfo LoadBook(BookInfo book, Action<string> log) { return book; }
+            public string LoadChapter(BookInfo book, ChapterInfo chapter, Action<string> log)
+            {
+                System.Threading.Interlocked.Increment(ref Active);
+                System.Threading.Interlocked.Increment(ref Calls);
+                Started.Signal();
+                Started.Wait(5000);
+                try
+                {
+                    if (chapter.Id != "0") System.Threading.Thread.Sleep(400);
+                    return new string('x', 80);
+                }
+                finally
+                {
+                    if (System.Threading.Interlocked.Decrement(ref Active) == 0) Finished.Set();
+                }
+            }
         }
 
         /// <summary>
@@ -6003,7 +6081,66 @@ namespace TomatoBiquga
             File.WriteAllText(path, "{\"items\":[\"书一\",\"\",\"  \",\"书二\"]}", new UTF8Encoding(false));
             Eq("队列：空白项被丢弃", 2, Bookshelf.LoadQueue(path).Count);
 
+            // 新格式：完成/跳过项不再带回，失败/未完成项可恢复。
+            var stateItems = new List<Bookshelf.QueueItem>
+            {
+                new Bookshelf.QueueItem { Text = "待下载", Status = "pending" },
+                new Bookshelf.QueueItem { Text = "正在下载", Status = "running" },
+                new Bookshelf.QueueItem { Text = "已完成", Status = "done" },
+                new Bookshelf.QueueItem { Text = "失败项", Status = "failed", Error = "超时" },
+                new Bookshelf.QueueItem { Text = "主动跳过", Status = "skipped" },
+            };
+            Check("队列状态：保存成功", Bookshelf.SaveQueueState(path, stateItems));
+            var states = Bookshelf.LoadQueueState(path);
+            Eq("队列状态：往返条数", 5, states.Count);
+            Eq("队列状态：失败原因保留", "超时", states[3].Error);
+            var recover = Bookshelf.LoadQueue(path);
+            Eq("队列状态：恢复只带未完成项", 3, recover.Count);
+            Eq("队列状态：恢复第一项", "待下载", recover[0]);
+            Eq("队列状态：running 按未完成恢复", "正在下载", recover[1]);
+            Eq("队列状态：failed 按未完成恢复", "失败项", recover[2]);
+
+            using (var locked = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Check("队列状态：替换失败返回 false", !Bookshelf.SaveQueue(path, new List<string> { "replacement" }));
+            }
+            Eq("队列状态：替换失败保留原文件", "待下载", Bookshelf.LoadQueue(path)[0]);
+            Eq("队列状态：替换失败清理临时文件", 0, Directory.GetFiles(work, "队列.json.*.tmp").Length);
+
+            // 旧格式仍能被状态读取器识别为 pending。
+            File.WriteAllText(path, "{\"items\":[\"旧书\"]}", new UTF8Encoding(false));
+            var legacyStates = Bookshelf.LoadQueueState(path);
+            Eq("队列状态：旧格式转 pending", "pending", legacyStates[0].Status);
+
+            File.WriteAllText(path, "{\"items\":[{\"text\":\"partial\",\"status\":\"done\"", Encoding.UTF8);
+            Eq("队列状态：截断 JSON 不接受半条记录", 0, Bookshelf.LoadQueueState(path).Count);
+
             try { if (File.Exists(path)) File.Delete(path); } catch { }
+        }
+
+        private static void TestQueueInputParsing()
+        {
+            var tomato = QueueInput.Parse("番茄：某本书");
+            Eq("队列前缀：中文站点", "fanqie", tomato.SiteKey);
+            Eq("队列前缀：中文冒号后的关键词", "某本书", tomato.Keyword);
+
+            var pc = QueueInput.Parse("biquga: 另一部书");
+            Eq("队列前缀：英文站点", "biquga", pc.SiteKey);
+            Eq("队列前缀：英文冒号后的关键词", "另一部书", pc.Keyword);
+
+            var url = QueueInput.Parse("https://www.biquga.com/10_10333/");
+            Eq("队列前缀：URL 不误切前缀", "", url.SiteKey);
+            Eq("队列前缀：URL 保持完整", "https://www.biquga.com/10_10333/", url.Keyword);
+
+            var unknown = QueueInput.Parse("未知站点：书名");
+            Eq("队列前缀：未知前缀不吞掉关键词", "", unknown.SiteKey);
+            Eq("队列前缀：未知前缀保留原行", "未知站点：书名", unknown.Keyword);
+
+            var bound = QueueInput.Bind(new[] { "书一", "番茄：123456", "书二", "https://fanqienovel.com/page/123456" }, "biquga-m");
+            Eq("队列：默认站点写入恢复记录", "biquga-m:书一", bound[0]);
+            Eq("队列：前缀只作用于所在行", "biquga-m:书二", bound[2]);
+            Eq("队列：链接自动识别来源", "fanqie:https://fanqienovel.com/page/123456", bound[3]);
+            Eq("队列：恢复时不受当前默认站点影响", bound[0], QueueInput.Bind(bound, "fanqie")[0]);
         }
 
         // ============================================================
